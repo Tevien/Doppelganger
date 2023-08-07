@@ -1,0 +1,19 @@
+{
+    "description": "Doppelganger: Automated twinning",
+    "license": "MIT",
+    "upload_type": "software",
+    "creators": [
+        {
+            "affiliation": "Amsterdam UMC",
+            "name": "Sean Benson",
+            "orcid": "0000-0003-4819-779X"
+        }
+    ],
+    "access_right": "open",
+    "keywords": [
+        "Transfer learning",
+        "CNN",
+        "Deep learning",
+        "Medical imaging"
+      ]
+}
