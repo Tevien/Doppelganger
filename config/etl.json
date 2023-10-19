@@ -1,0 +1,14 @@
+{
+    "name": "test",
+    "_comment": "{filename: [patient_id, col1, col2, {col3: value:[{val1:reqname}, ...]]}",
+    "absolute_path": "/Users/sbenson/Documents/Datasets/mimic-iv-2.2/hosp/",
+    "labevents.csv.gz": ["subject_id", "itemid",
+    {"value": [{"50907": "cholesterol"}, 
+    {"50904": "hdlchol"}, {"50905": "ldlchol"}, 
+    {"51631": "hba1cconc"}, 
+    {"52172": "rdw"}, {"50862": "albumin"}, 
+    {"50912": "creatinine"}]}],
+    "patients.csv.gz": ["subject_id", "gender", "anchor_age"],
+    "categories": {"gender": ["M", "F"]},
+    "scaler": "scaler.h5"
+}
