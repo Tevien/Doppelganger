@@ -3,6 +3,7 @@ from doppelganger.etl.convert_to_parquet import convert
 import dask.dataframe as dd
 from dask_ml.impute import SimpleImputer
 from dask_ml.preprocessing import StandardScaler
+from joblib import load, dump
 import pandas as pd
 import numpy as np
 import logging
@@ -137,7 +138,19 @@ class ImputeScaleCategorize(luigi.Task):
     def run(self):
         with open(self.etl_config, 'r') as f:
             input_json = json.load(f)
+        name = input_json['name']
 
+        assert all(x in list(input_json.keys()) for x in ["scaler", "imputer"]), "Scaler and imputer not specified"
+        scaler_path = f"data/{name}/preprocessing/{input_json['scaler']}"
+        imputer_path = f"data/{name}/preprocessing/{input_json['imputer']}"
+        load_sc, load_imp = False, False
+        if os.path.exists(scaler_path):
+            load_sc = True
+            scaler = load(scaler_path)
+        if os.path.exists(imputer_path):
+            load_imp = True
+            imputer = load(imputer_path)
+        
         ddf = dd.read_parquet(self.input())
 
         # Make cells with underscores nan
@@ -149,12 +162,13 @@ class ImputeScaleCategorize(luigi.Task):
         # Remove categorical columns from list
         categories = input_json['categories']
         num_cols = [c for c in total_cols if c not in categories.keys()]
-        
-        # Scale numerical columns
-        scaler = StandardScaler()
         for n in num_cols:
             ddf[n] = ddf[n].astype('float32')
-        scaler.fit(ddf[num_cols])
+
+        # Scale numerical columns
+        if not load_sc:
+            scaler = StandardScaler()
+            scaler.fit(ddf[num_cols])
         ddf[num_cols] = scaler.transform(ddf[num_cols])
 
         # Map categorical columns to binary if only 2
@@ -168,9 +182,16 @@ class ImputeScaleCategorize(luigi.Task):
                 ddf = dd.get_dummies(ddf, columns=[c])
         
         # Impute missing values
-        imputer = SimpleImputer(strategy='median')
-        imputer.fit(ddf)
+        if not load_imp:
+            imputer = SimpleImputer(strategy='median')
+            imputer.fit(ddf)
         ddf = imputer.transform(ddf)
+
+        # Save scaler/imputer to h5 file
+        if not load_sc:
+            dump(scaler, scaler_path)
+        if not load_imp:
+            dump(imputer, imputer_path)
         
         ddf.to_parquet(self.output().path)
         

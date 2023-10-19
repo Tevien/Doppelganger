@@ -10,5 +10,6 @@
     {"50912": "creatinine"}]}],
     "patients.csv.gz": ["subject_id", "gender", "anchor_age"],
     "categories": {"gender": ["M", "F"]},
-    "scaler": "scaler.h5"
+    "scaler": "scaler.h5",
+    "imputer": "imputer.h5"
 }
