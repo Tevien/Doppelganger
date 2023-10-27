@@ -1,0 +1,15 @@
+{
+    "name": "Lightning_vanilla_test",
+    "data_args": {
+        "inputfile": "data/test/preprocessing/preprocessed_imputed.parquet"
+    },
+    "absolute_path": "/Users/sbenson/GH/Doppelganger",
+    "datatype": "tabular",
+    "model": "vanilla_ae",
+    "model_args": {
+        "mid_size": 100,
+        "latent_size": 10
+    },
+    "epochs": 5,
+    "batchlim": 100
+}
