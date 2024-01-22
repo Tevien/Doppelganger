@@ -41,7 +41,8 @@ class Tabular(Dataset):
         X_train, X_test, y_train, y_test = train_test_split(self.dd.to_dask_array(lengths=True), y, test_size=0.2, 
                                                             random_state=foldgenseed,
                                                             shuffle=True)
-
+        self.cols = self.dd.columns
+        self.tr_test = tr_test
         if tr_test == "train":
             self.X = X_train
             self.y = y_train
@@ -57,3 +58,11 @@ class Tabular(Dataset):
     def __getitem__(self, idx):
         sample = np.array(self.X[idx].astype(np.float32)), np.array(self.y[idx].astype(np.float32))
         return sample
+    
+    def save_train_test(self, save_dir):
+        """Save train and test data to parquet"""
+        # Make array into dataframe
+        dd_X = dd.from_array(self.X, columns=self.cols)
+        dd_y = dd.from_array(self.y, columns=["label"])
+        self.X.to_parquet(os.path.join(save_dir, f"{self.tr_test}_X.parquet"))
+        self.y.to_parquet(os.path.join(save_dir, f"{self.tr_test}_y.parquet"))

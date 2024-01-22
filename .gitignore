@@ -162,4 +162,4 @@ cython_debug/
 # Own intermediate files
 data/*
 log/*
-scripts/*
+scripts/*.ipynb
