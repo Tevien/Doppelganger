@@ -1,6 +1,9 @@
+import pandas as pd
+import numpy as np
+
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-def calculateMAGGIC(data:pd.DataFrame, columns:Dict[str, str],
+def calculateMAGGIC(data:pd.DataFrame, columns:dict,
 
                     ) -> pd.DataFrame:
 
@@ -48,16 +51,14 @@ def calculateMAGGIC(data:pd.DataFrame, columns:Dict[str, str],
 
     # check input
 
-    if len(columns) != 13:
-        raise InputValidationError('`columns` should contain `13` entries.')
+    assert len(columns) == 13, "`columns` should contain `13` entries."
     missing_columns = list(set(columns.values()).difference(data.columns))
-    if len(missing_columns) > 0:
-        raise InputValidationError('The following columns are missing: ' +\
+    assert len(missing_columns) == 0, "'The following columns are missing: ' "+\
                                    ','.join(
                                        [list(columns.keys())[
                                            list(columns.values()).index(e)
                                        ] for e in missing_columns]
-                                   ))
+                                   )
 
     # ### initiate empty MAGGIC
     maggic = [0] * data.shape[0]
