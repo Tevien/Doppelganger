@@ -1,10 +1,12 @@
 from doppelganger.utils.utils_etl import file_size, return_subset, vals_to_cols
+from doppelganger.utils.functions import transform_aggregations, merged_transforms
 from doppelganger.etl.convert_to_parquet import convert
 import dask.dataframe as dd
 from dask_ml.impute import SimpleImputer
 from dask_ml.preprocessing import StandardScaler
 from joblib import load, dump
 import pandas as pd
+import polars as pl
 import numpy as np
 import logging
 import json
@@ -25,16 +27,22 @@ class ConvertLargeFiles(luigi.Task):
     def output(self):
         with open(self.etl_config, 'r') as f:
             input_json = json.load(f)
-        name = input_json['name']
-        prefix = f"data/{name}"
-        return luigi.LocalTarget(os.path.join(prefix, self.lu_output_path))
+        name = input_json.get('name', None)
+        outdir = input_json.get('preprocessing', None)
+        if not outdir:
+            name = input_json.get('name', None)
+            outdir = f"data/{name}/preprocessing"
+        return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
     
     def run(self):
         # Load input json
         with open(self.etl_config, 'r') as f:
             input_json = json.load(f)
-        name = input_json['name']
-        outdir = f"data/{name}/preprocessing"
+        name = input_json.get('name', None)
+        outdir = input_json.get('preprocessing', None)
+        if not outdir:
+            outdir = f"data/{name}/preprocessing"
+
         if not os.path.isdir(outdir):
             os.makedirs(outdir)
         
@@ -42,9 +50,11 @@ class ConvertLargeFiles(luigi.Task):
         # Keep only names with [.csv and .csv.gz] extensions
         filenames = [f for f in filenames if any([f.endswith(ext) for ext in ['.csv', '.csv.gz']])]
         
-        path = input_json['absolute_path']
+        path = input_json.get('absolute_path', None)
         filenames = [os.path.join(path, f) for f in filenames]
-        assert all([os.path.exists(f) for f in filenames]), "Some files do not exist"
+        logging.info(f"Filenames: {filenames}")
+        if filenames:
+            assert all([os.path.exists(f) for f in filenames]), "Some files do not exist"
         logger.info(f"*** Found {len(filenames)} files to convert ***")
 
         # Check if larger than size limit
@@ -53,7 +63,7 @@ class ConvertLargeFiles(luigi.Task):
         # Convert the remaining files
         filenames_out = [f.replace('.csv', '.parquet') for f in filenames]
         filenames_out = [f.split("/")[-1] for f in filenames_out]
-        filenames_out = [os.path.join(f"data/{name}/preprocessing", f) for f in filenames_out]
+        filenames_out = [os.path.join(outdir, f) for f in filenames_out]
 
         for i, o in zip(filenames, filenames_out):
             convert(i, o)
@@ -62,18 +72,22 @@ class ConvertLargeFiles(luigi.Task):
         with self.output().open('w') as f:
             json.dump(dict(zip(filenames, filenames_out)), f)
 
+
 class PreProcess(luigi.Task):
     lu_output_path = luigi.Parameter(default='preprocessed.parquet')
     etl_config = luigi.Parameter(default="config/etl.json")
 
     def requires(self):
-        return ConvertLargeFiles()
+        return ConvertLargeFiles(etl_config=self.etl_config)
     
     def output(self):
         with open(self.etl_config, 'r') as f:
             input_json = json.load(f)
-        prefix = f"data/{input_json['name']}/preprocessing"
-        return luigi.LocalTarget(os.path.join(prefix, self.lu_output_path))
+        outdir = input_json.get('preprocessing', None)
+        if not outdir:
+            name = input_json.get('name', None)
+            outdir = f"data/{name}/preprocessing"
+        return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
     
     def run(self):
         # Load input json
@@ -81,10 +95,13 @@ class PreProcess(luigi.Task):
             input_json = json.load(f)
 
         filenames = input_json.keys()
-        filenames = [f for f in filenames if any([f.endswith(ext) for ext in ['.csv', '.csv.gz']])]
+
+        # Keep only names with normal extensions
+        filenames = [f for f in filenames if any([f.endswith(ext) for ext in ['.csv', '.csv.gz', '.parquet', '.feather']])]
         path = input_json['absolute_path']
         filenames = [os.path.join(path, f) for f in filenames]
         
+        # Load converted json
         with self.input().open('r') as f:
             converted_json = json.load(f)
         filenames_to_convert = converted_json.keys()
@@ -95,9 +112,24 @@ class PreProcess(luigi.Task):
         # Open empty dask dataframe
         df_pp = None
 
-        print(filenames)
+        logging.info(f"Filenames: {filenames}")
         # Create the requested columns from each filename
         for o, f in zip(filenames, new_filenames):
+            # First check if we have this file checkpointed
+            current_name = f.split("/")[-1].split(".")[0]
+            saved_loc = f"{input_json['preprocessing']}/{current_name}_preprocessed.parquet"
+            # If file exists then load it
+            if os.path.exists(saved_loc):
+                print(f"*** Loading {saved_loc} ***")
+                df = dd.read_parquet(saved_loc, npartitions=3) #TODO: Make this configurable
+                print(df.head())
+                if df_pp is None:
+                    df_pp = df
+                else:
+                    print(df_pp.head())
+                    df_pp = df_pp.merge(df, how="left")
+                continue
+
             print(f"*** Processing {f} ***")
             vals = input_json[o.split("/")[-1]]
             index = vals[0]
@@ -111,28 +143,70 @@ class PreProcess(luigi.Task):
             else:
                 df = vals_to_cols(f, cols, index_col=index)
             assert df.index.unique, "Index is not unique"
-            
+
+
+            df_20 = df.head(20)
+            logging.info("df pre transform:")
+            logging.info(df_20)
+
+            # See if any column names specify aggregations
+            aggs = input_json.get('PreTransforms', None)
+            if not aggs:
+                logging.info("No aggregations or transforms specified")
+            # Find intersection of cols and aggs keys
+            cols_for_aggregations = list(set(cols).intersection(aggs.keys()))
+
+            # Apply aggregations
+            if cols_for_aggregations:
+                df = transform_aggregations(df, aggs, cols_for_aggregations)
+
             # Add new cols to the dataframe and join with subject_id
             #df_100 = df.head(100)
             #print(df_100)
+            df_20 = df.head(20)
+            logging.info("df post transform:")
+            logging.info(df_20)
+            # Checkpoint pre-concat
+            # Save current transformed dataframe
+            df.to_parquet(saved_loc)
+
+            df_pp_20 = df.head(20)
+            logging.info("df_pp premerge")
+            logging.info(df_pp_20)
             if df_pp is None:
                 df_pp = df
             else:
-                df_pp = dd.multi.concat([df_pp, df], axis=1)
+                df_pp = df_pp.merge(df, how="left")
+            df_pp_20 = df.head(20)
+            logging.info("df_pp postmerge")
+            logging.info(df_pp_20)
+        
+        # Merged transforms
+        end_transforms = input_json.get('MergedTransforms', None)
+        df_pp = merged_transforms(df_pp, end_transforms)
+        
+        # Reduce to final specified columns
+        df_pp = df_pp[input_json["final_cols"]]
+        print(df_pp.head(20))
+        print(f"Final shape: {df_pp.shape}")
         
         df_pp.to_parquet(self.output())
+
 
 class ImputeScaleCategorize(luigi.Task):
     lu_output_path = luigi.Parameter(default='preprocessed_imputed.parquet')
     etl_config = luigi.Parameter(default="config/etl.json")
 
     def requires(self):
-        return PreProcess()
+        return PreProcess(etl_config=self.etl_config)
     
     def output(self):
         with open(self.etl_config, 'r') as f:
             input_json = json.load(f)
-        prefix = f"data/{input_json['name']}/preprocessing"
+        outdir = input_json.get('preprocessing', None)
+        if not outdir:
+            name = input_json.get('name', None)
+            outdir = f"data/{name}/preprocessing"
         return luigi.LocalTarget(os.path.join(prefix, self.lu_output_path))
     
     def run(self):
@@ -140,6 +214,7 @@ class ImputeScaleCategorize(luigi.Task):
             input_json = json.load(f)
         name = input_json['name']
 
+        # TODO: Fix for preprocessing locs
         assert all(x in list(input_json.keys()) for x in ["scaler", "imputer"]), "Scaler and imputer not specified"
         scaler_path = f"data/{name}/preprocessing/{input_json['scaler']}"
         imputer_path = f"data/{name}/preprocessing/{input_json['imputer']}"
@@ -196,5 +271,5 @@ class ImputeScaleCategorize(luigi.Task):
         ddf.to_parquet(self.output().path)
         
 
-if __name__ == '__main__':
+if __name__ == '__main__':    
     luigi.build([ConvertLargeFiles(), PreProcess(), ImputeScaleCategorize()], workers=2, local_scheduler=True)
