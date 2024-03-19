@@ -29,7 +29,6 @@ decorator==5.1.1
 deepdiff==6.3.1
 distributed==2023.10.0
 docutils==0.20.1
--e git+https://github.com/Tevien/Doppelganger.git@2cbdc664c5d2e2992c0d671d1bee7e9ba84c7a2b#egg=doppelganger
 exceptiongroup==1.1.2
 executing==1.2.0
 fastapi==0.100.1
