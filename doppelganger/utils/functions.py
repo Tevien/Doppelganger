@@ -55,7 +55,7 @@ def diagnoseprocess_simple(_df, **kwargs):
     disease = kwargs.get('disease', None)
     search_col = kwargs.get('search_col', None)
     id_col = kwargs.get('id_col', None)
-    _df = _df.fillna(value={search_col: 0})
+    _df = _df.fillna(value={search_col: "0"})
     # Make binary column for diabetes
     _df[disease] = _df.apply(lambda x: 1 if disease in x[search_col].lower() else 0, axis=1,
                              meta=pd.Series(dtype='int', name=disease))
@@ -113,9 +113,60 @@ def ace(_df, **kwargs):
         reset = True
     _df_ace = _df[[out_col, id_col]].groupby(id_col).max().reset_index()
     if reset:
-        _df = _df.set_index(id_col)
+        _df_ace = _df.set_index(id_col)
 
     return _df_ace
+
+def beta(_df, **kwargs):
+    beta_blockers = {
+    "Atenolol": "C07AB03",
+    "Bisoprolol": "C07AB07",
+    "Metoprolol": "C07AB02",
+    "Propranolol": "C07AA05",
+    "Carvedilol": "C07AG02",
+    "Nebivolol": "C07AB12"
+    }
+    meds = kwargs.get('meds', None)
+    out_col = kwargs.get('out_col', None)
+    id_col = kwargs.get('id_col', None)
+
+    # Beta blockers
+    beta_atc = list(beta_blockers.values())
+    logging.info("Looking for beta blockers with codes:", beta_atc)
+
+    _df = _df.fillna(value={meds: "missing"})
+    _df = _df.mask(_df == 'NA', "missing")
+    _df[out_col] = _df.apply(lambda x: 1 if x[meds] in beta_atc else 0, axis=1,
+                             meta=pd.Series(dtype='int', name=out_col))
+    # If id_col is the index then reset and set again
+    reset = False
+    if id_col == _df.index.name:
+        _df = _df.reset_index(drop=False)
+        logging.info("Id col is the index")
+        reset = True
+    _df_beta = _df[[out_col, id_col]].groupby(id_col).max().reset_index()
+    if reset:
+        _df_beta = _df_beta.set_index(id_col)
+
+    return _df_beta
+
+def chain(_df, **kwargs):
+    # Get the functions
+    funcs = kwargs.get('funcs', None)
+    merge_id = kwargs.get('merge_id', None)
+
+    df_pandas = pd.DataFrame()
+    final = dd.from_pandas(df_pandas, npartitions=1)
+    
+    for func in funcs:
+        # Get func kwargs
+        f_kwargs = kwargs['kwargs'].get(func, None)
+        i_df = function_to_execute(func)(_df, **f_kwargs)
+        if len(final)==0:
+            final = i_df
+        else:
+            final = dd.merge(final, i_df, on=merge_id, how='outer')
+    return final
 
 def diff(_df, **kwargs):
     out_col = kwargs.get('out_col', None)
@@ -161,10 +212,12 @@ function_dict = {
     "smokerprocess": smokerprocess,
     "diagnoseprocess_simple": diagnoseprocess_simple,
     "ace": ace,
+    "beta": beta,
     "diff": diff,
     "map": dg_map,
     "fillna": fillna,
-    "dropna": dropna
+    "dropna": dropna,
+    "chain": chain
 }
 
 def function_to_execute(config_parameter):

@@ -3,6 +3,9 @@ import dask.dataframe as dd
 import polars as pl
 import pandas as pd
 import numpy as np
+import logging
+
+logger = logging.getLogger('luigi-interface')
 
 def first_non_nan(x):
     return x[np.isfinite(x)][0]
@@ -55,12 +58,15 @@ def vals_to_cols(filename, cols, index_col=None, blocksize=10000, agg=None):
     col_name = cols[0]
     valname = list(cols[1].keys())[0]
     vars = cols[1][valname]
-    k_vars = [int(list(v.keys())[0]) for v in vars]
+    try:
+        k_vars = [int(list(v.keys())[0]) for v in vars]
+    except ValueError:
+        k_vars = [list(v.keys())[0] for v in vars]
     
     if '.parquet' in filename:
         df = dd.read_parquet(filename)
     elif '.feather' in filename:
-        df = dd.from_pandas(pd.read_feather(filename, npartitions=3))
+        df = dd.from_pandas(pd.read_feather(filename), npartitions=3)
     else:
         df = dd.read_csv(filename, blocksize=blocksize)
 
@@ -73,6 +79,7 @@ def vals_to_cols(filename, cols, index_col=None, blocksize=10000, agg=None):
     df_filtered[col_name] = df_filtered[col_name].cat.as_known()
 
     if not agg:
+        logging.info(f"index col {index_col}, col name {col_name}, valname {valname}, k_vars {k_vars}")
         #fnn = dd.Aggregation(name='fnn', chunk=lambda x: x[np.isfinite(x)][0], agg=lambda x: x[np.isfinite(x)][0])
         df_pivoted = df_filtered.pivot_table(index=index_col, columns=col_name, values=valname, 
                                             aggfunc='last').compute()
