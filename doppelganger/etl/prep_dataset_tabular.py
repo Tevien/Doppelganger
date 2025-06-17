@@ -87,8 +87,41 @@ class PreProcess(luigi.Task):
         if not outdir:
             name = input_json.get('name', None)
             outdir = f"data/{name}/preprocessing"
+        print(f"Output directory: {outdir}")
+        print(f"Output path: {self.lu_output_path}")
         return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
     
+    def apply_transformations(self, s_df, _config, total_cols, transform_type="PreTransforms"):
+        # See if any column names specify aggregations
+        aggs = _config.get(transform_type, None)
+        if not aggs:
+            logging.info("No aggregations or transforms specified")
+        
+        # Separate cols into dictionaries and non-dictionaries
+        # Check if there's any dictionaries in cols
+        d_entry = any([isinstance(c, dict) for c in total_cols])
+
+        l_cols = []
+        if not d_entry:
+            # If no dictionaries, just use cols directly
+            l_cols = total_cols
+        else:
+            # Find the key of the innermost nested dictionary
+            d_cols = total_cols[1]
+            for k, v in d_cols.items():
+                l_cols.extend(list(v.values()))
+            # Add the outer key too
+            l_cols.append(total_cols[0]) 
+
+        # Find intersection of cols and aggs keys
+        cols_for_aggregations = list(set(l_cols).intersection(aggs.keys()))
+
+        print("Aggregation columns: ", cols_for_aggregations)
+        # Apply aggregations
+        if cols_for_aggregations:
+            s_df = transform_aggregations(s_df, aggs, cols_for_aggregations)
+        return s_df
+
     def run(self):
         # Load input json
         with open(self.etl_config, 'r') as f:
@@ -123,6 +156,8 @@ class PreProcess(luigi.Task):
                 print(f"*** Loading {saved_loc} ***")
                 df = dd.read_parquet(saved_loc, npartitions=3) #TODO: Make this configurable
                 print(df.head())
+                print("Index: ", df.index.name)
+                print("Columns: ", df.columns)
                 if df_pp is None:
                     df_pp = df
                 else:
@@ -135,13 +170,43 @@ class PreProcess(luigi.Task):
             index = vals[0]
             cols = vals[1:]
 
+            print(f"Index: {index}")
+            print(f"Columns: {cols}")
+
             # are any items in the list dictionaries?
             col_extract = not any([isinstance(v, dict) for v in vals])
             logger.info(f"*** Column extraction: {col_extract} ***")
             if col_extract:
                 df = return_subset(f, cols, index_col=index)
             else:
-                df = vals_to_cols(f, cols, index_col=index)
+                """ Assume form of cols is:
+                ["col_name", {"val_name": {"type1": name1, "type2": name2}}, ["optional_extra_col"]]
+                """
+
+                if '.parquet' in f:
+                    df = dd.read_parquet(f)
+                elif '.feather' in f:
+                    df = dd.from_pandas(pd.read_feather(f), npartitions=3)
+                else:
+                    df = dd.read_csv(f, blocksize=blocksize)
+
+                # Apply initial transformations
+                print(df.head(20))
+                print(f"Columns: {df.columns.tolist()}")
+                df = self.apply_transformations(df, input_json, cols, transform_type="InitTransforms")
+                print(df.head(20))
+                print(f"Columns: {df.columns.tolist()}")
+                
+                col_name = cols[0]
+                val_name = list(cols[1].keys())[0]
+                col_map = cols[1][val_name]
+                extra_cols = None
+                if len(cols) == 3:
+                    extra_cols = cols[2]
+                if len(cols) > 3:
+                    raise ValueError("Too many columns specified")
+                df = vals_to_cols(df, index_col=index, code_col=col_name, value_col=val_name,
+                code_map=col_map, extra_cols=extra_cols)
             assert df.index.unique, "Index is not unique"
 
 
@@ -149,21 +214,13 @@ class PreProcess(luigi.Task):
             logging.info("df pre transform:")
             logging.info(df_20)
 
-            # See if any column names specify aggregations
-            aggs = input_json.get('PreTransforms', None)
-            if not aggs:
-                logging.info("No aggregations or transforms specified")
-            # Find intersection of cols and aggs keys
-            cols_for_aggregations = list(set(cols).intersection(aggs.keys()))
-
-            # Apply aggregations
-            if cols_for_aggregations:
-                df = transform_aggregations(df, aggs, cols_for_aggregations)
+            self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
 
             # Add new cols to the dataframe and join with subject_id
             #df_100 = df.head(100)
             #print(df_100)
             df_20 = df.head(20)
+            print(df_20)
             logging.info("df post transform:")
             logging.info(df_20)
             # Checkpoint pre-concat
@@ -171,8 +228,11 @@ class PreProcess(luigi.Task):
             df.to_parquet(saved_loc)
 
             df_pp_20 = df.head(20)
-            logging.info("df_pp premerge")
+            print("df_pp premerge")
             logging.info(df_pp_20)
+            if df_pp is not None:
+                logging.info(f"Shape before merge: {df_pp.shape}")
+            logging.info(f"New data shape: {df.shape}")
             if df_pp is None:
                 df_pp = df
             else:
@@ -180,10 +240,12 @@ class PreProcess(luigi.Task):
             df_pp_20 = df.head(20)
             logging.info("df_pp postmerge")
             logging.info(df_pp_20)
+            print(f"Shape after merge: {df_pp.shape}")
         
         # Merged transforms
         end_transforms = input_json.get('MergedTransforms', None)
         df_pp = merged_transforms(df_pp, end_transforms)
+
         
         # Reduce to final specified columns
         df_pp = df_pp[input_json["final_cols"]]
@@ -191,6 +253,7 @@ class PreProcess(luigi.Task):
         print(f"Final shape: {df_pp.shape}")
         
         df_pp.to_parquet(self.output())
+        print("Success")
 
 
 class ImputeScaleCategorize(luigi.Task):

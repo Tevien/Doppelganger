@@ -1,6 +1,7 @@
 import dask.dataframe as dd
 import pandas as pd
 import logging
+from doppelganger.utils.definitions import ace_atc, beta_atc, make_classification_map
 
 logger = logging.getLogger('luigi-interface')
 
@@ -94,12 +95,7 @@ def ace(_df, **kwargs):
     out_col = kwargs.get('out_col', None)
     id_col = kwargs.get('id_col', None)
 
-    # ACE inhibitors
-    ace_atc = [f"C09AA{n:02d}" for n in range(1,17)]
-    ace_atc.extend([f"C09BA{n:02d}" for n in range(1,16)])
-    ace_atc.extend([f"C09BB{n:02d}" for n in range(2,13)])
-    ace_atc.extend([f"C09BX{n:02d}" for n in range(1,6)])
-    logging.info("Looking for ACEi with codes:", ace_atc)
+    logger.info("Looking for ACEi with codes:", ace_atc)
 
     _df = _df.fillna(value={meds: "missing"})
     _df = _df.mask(_df == 'NA', "missing")
@@ -118,20 +114,13 @@ def ace(_df, **kwargs):
     return _df_ace
 
 def beta(_df, **kwargs):
-    beta_blockers = {
-    "Atenolol": "C07AB03",
-    "Bisoprolol": "C07AB07",
-    "Metoprolol": "C07AB02",
-    "Propranolol": "C07AA05",
-    "Carvedilol": "C07AG02",
-    "Nebivolol": "C07AB12"
-    }
+
     meds = kwargs.get('meds', None)
     out_col = kwargs.get('out_col', None)
     id_col = kwargs.get('id_col', None)
 
     # Beta blockers
-    beta_atc = list(beta_blockers.values())
+    beta_atc = list(beta_atc.values())
     logging.info("Looking for beta blockers with codes:", beta_atc)
 
     _df = _df.fillna(value={meds: "missing"})
@@ -149,6 +138,33 @@ def beta(_df, **kwargs):
         _df_beta = _df_beta.set_index(id_col)
 
     return _df_beta
+
+def classify(_df, **kwargs):
+    classification_map = kwargs.get('classification_map', None) # dictionary of {col: {class1: [values], class2: [values]}}
+    out_col = kwargs.get('out_col', None)
+    input_col = kwargs.get('input_col', None)
+    id_col = kwargs.get('id_col', None)
+    """
+    Classify values in a column based on a classification map.
+    The classification map is a dictionary where keys are the classification names
+    and values are lists of values that belong to that classification.
+    """
+    if classification_map is None:
+        raise ValueError("classification_map must be provided")
+    if out_col is None:
+        raise ValueError("out_col must be provided")
+    if input_col is None:
+        raise ValueError("input_col must be provided")
+    if id_col is None:
+        raise ValueError("id_col must be provided")
+
+    classification_map = make_classification_map(classification_map)
+    # Create a new column for classification
+    _df[out_col] = _df.apply(lambda x: next((k for k, v in classification_map.items() if x[input_col] in v), 'Other'),
+                             axis=1, meta=pd.Series(dtype='object', name=out_col))
+
+    return _df
+
 
 def chain(_df, **kwargs):
     # Get the functions
@@ -217,7 +233,8 @@ function_dict = {
     "map": dg_map,
     "fillna": fillna,
     "dropna": dropna,
-    "chain": chain
+    "chain": chain,
+    "classify": classify,
 }
 
 def function_to_execute(config_parameter):
@@ -244,3 +261,4 @@ def merged_transforms(_df, _tfs):
         print(_kwargs)
         _df = func(_df, **_kwargs)
     return _df
+

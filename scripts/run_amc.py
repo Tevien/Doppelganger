@@ -5,7 +5,7 @@ import argparse
 # Set up the command line arguments
 parser = argparse.ArgumentParser(description='Run the AMC ETL pipeline.')
 parser.add_argument('--etlconfig', type=str, help='Path to the ETL configuration file.',
-                    default='/home/sbenson/sw/Doppelganger/config/etl_amc.json')
+                    default='/home/sbenson/sw/Doppelganger/config/etl_amc_v3.json')
 args = parser.parse_args()
 etl_config = args.etlconfig
 

@@ -12,7 +12,7 @@ import numpy as np
 
 
 class Tabular(Dataset):
-    """Tabular Dataset from CT images."""
+    """Tabular Dataset"""
 
     def __init__(self, filename, tr_test="train", 
                  foldgenseed=42,

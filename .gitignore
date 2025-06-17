@@ -36,6 +36,9 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Slurm logs
+*.out
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -162,4 +165,4 @@ cython_debug/
 # Own intermediate files
 data/*
 log/*
-scripts/*.ipynb
+scripts/*
