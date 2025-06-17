@@ -114,7 +114,6 @@ def ace(_df, **kwargs):
     return _df_ace
 
 def beta(_df, **kwargs):
-
     meds = kwargs.get('meds', None)
     out_col = kwargs.get('out_col', None)
     id_col = kwargs.get('id_col', None)
