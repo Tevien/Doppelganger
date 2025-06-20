@@ -8,7 +8,7 @@
     "Datatools4heart_Patient.feather": ["pseudo_id", "Geboortejaar", 
     "Geboortemaand", "Geslacht", "Overlijdensdatum"],
     "Datatools4heart_Opnametraject.feather": ["pseudo_id", "OpnameDatum"],
-    "Datatools4heart_Tabakgebruik.feather": ["pseudo_id", "IsHuidigeRoker", "IsVoormaligRoker"],
+    "Datatools4heart_Tabakgebruik.feather": ["pseudo_id", "IsHuidigeRoker", "IsVoormaligRoker", "Patientcontactid"],
     "Datatools4heart_MetingBMI.feather": ["pseudo_id", "Patientcontactid", "BMI"],
     "Datatools4heart_MetingBloeddruk.feather": ["pseudo_id", "PatientContactId", "SystolischeBloeddrukWaarde", "DiastolischeBloeddrukWaarde"],
     "Datatools4heart_VoorgeschiedenisMedisch.feather": ["pseudo_id", "diagnosecode_classified", {"diagnosecode": {"t2dm": "t2dm", "af": "af", "chronic_ischemic_hd": "chronic_ischemic_hd", "acute_mi": "acute_mi"}}, ["IndicatieDatumVaststelling"]],
@@ -61,28 +61,13 @@
             }
         },
         "IsHuidigeRoker": {
-            "func": "smokerprocess",
-            "kwargs": {
-                "smoking": "IsHuidigeRoker",
-                "id_col": "pseudo_id"
-            }
-        },
-        "DiagnoseOmschrijving": {
-            "func": "diagnoseprocess_simple",
-            "kwargs": {
-                "disease": "diabetes",
-                "search_col": "DiagnoseOmschrijving",
-                "id_col": "pseudo_id"
-            }
-        },
-        "SystolischeBloeddrukWaarde": {
             "func": "keepfirst",
             "kwargs": {
-                "sort_col": "PatientContactId",
+                "sort_col": "Patientcontactid",
                 "drop_col": "pseudo_id"
             }
         },
-        "DiastolischeBloeddrukWaarde": {
+        "SystolischeBloeddrukWaarde": {
             "func": "keepfirst",
             "kwargs": {
                 "sort_col": "PatientContactId",
@@ -120,10 +105,16 @@
                 "map": {"Man": 0, "Vrouw": 1}
             }
         },
+        "IsHuidigeRoker": {
+            "func": "map",
+            "kwargs": {
+                "map": {"Nee": 0, "Ja": 1}
+            }
+        },
         "FillNaN": {
             "func": "fillna",
             "kwargs": {
-                "values": {"IsHuidigeRoker": 0, "diabetes": 0}
+                "values": {"IsHuidigeRoker": 0}
             }
         },
         "DropNaN": {

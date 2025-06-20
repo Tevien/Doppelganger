@@ -81,11 +81,12 @@ def smokerprocess(_df, **kwargs):
     _df[smoker] = _df[smoker].map(map_roken)
     
     # Group by pseudo_id and get max
+    reset = False
     if id_col == _df.index.name:
         _df = _df.reset_index(drop=False)
         logging.info("Id col is the index")
         reset = True
-    _df = _df[[smoker, id_col]].groupby(id_col).max().reset_index()
+    #_df = _df[[smoker, id_col]].groupby(id_col).max().reset_index()
     if reset:
         _df = _df.set_index(id_col)
     return _df

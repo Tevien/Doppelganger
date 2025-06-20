@@ -19,6 +19,11 @@ logger = logging.getLogger('luigi-interface')
 __author__ = 'SB'
 __date__ = '2023-09-25'
 
+def dask_shape(_df):
+    a = _df.shape
+    a[0].compute(),a[1]
+    return a
+
 class ConvertLargeFiles(luigi.Task):
     lu_output_path = luigi.Parameter(default='converted.json')
     lu_size_limit = luigi.IntParameter(default=500) # Limit in MB
@@ -121,6 +126,27 @@ class PreProcess(luigi.Task):
         if cols_for_aggregations:
             s_df = transform_aggregations(s_df, aggs, cols_for_aggregations)
         return s_df
+    
+    def safe_merge(self, _df, _df_pp):
+        # remove any of ["Patientcontactid", "PatientContactId"] from _df if it exists
+        if "Patientcontactid" in _df.columns:
+            _df = _df.drop(columns=["Patientcontactid"])
+        if "PatientContactId" in _df.columns:
+            _df = _df.drop(columns=["PatientContactId"])
+
+        print("df_pp premerge")
+        if _df_pp is not None:
+            logging.info(f"Shape before merge: {dask_shape(_df_pp)}")
+        logging.info(f"New data shape: {dask_shape(_df)}")
+        if _df_pp is None:
+            _df_pp = _df
+        else:
+            _df_pp = _df_pp.merge(_df, how="left")
+        _df_pp_20 = _df.head(20)
+        logging.info("df_pp postmerge")
+        logging.info(_df_pp_20)
+        print(f"Shape after merge: {dask_shape(_df_pp)}")
+        return _df_pp
 
     def run(self):
         # Load input json
@@ -158,11 +184,8 @@ class PreProcess(luigi.Task):
                 print(df.head())
                 print("Index: ", df.index.name)
                 print("Columns: ", df.columns)
-                if df_pp is None:
-                    df_pp = df
-                else:
-                    print(df_pp.head())
-                    df_pp = df_pp.merge(df, how="left")
+                df_pp_20 = df.head(20)
+                df_pp = self.safe_merge(df, df_pp)
                 continue
 
             print(f"*** Processing {f} ***")
@@ -214,7 +237,7 @@ class PreProcess(luigi.Task):
             logging.info("df pre transform:")
             logging.info(df_20)
 
-            self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
+            df = self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
 
             # Add new cols to the dataframe and join with subject_id
             #df_100 = df.head(100)
@@ -228,23 +251,12 @@ class PreProcess(luigi.Task):
             df.to_parquet(saved_loc)
 
             df_pp_20 = df.head(20)
-            print("df_pp premerge")
-            logging.info(df_pp_20)
-            if df_pp is not None:
-                logging.info(f"Shape before merge: {df_pp.shape}")
-            logging.info(f"New data shape: {df.shape}")
-            if df_pp is None:
-                df_pp = df
-            else:
-                df_pp = df_pp.merge(df, how="left")
-            df_pp_20 = df.head(20)
-            logging.info("df_pp postmerge")
-            logging.info(df_pp_20)
-            print(f"Shape after merge: {df_pp.shape}")
+            df_pp = self.safe_merge(df, df_pp)
         
         # Merged transforms
         end_transforms = input_json.get('MergedTransforms', None)
-        df_pp = merged_transforms(df_pp, end_transforms)
+        if end_transforms:
+            df_pp = merged_transforms(df_pp, end_transforms)
 
         
         # Reduce to final specified columns
