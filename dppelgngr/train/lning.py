@@ -4,9 +4,9 @@ import torch
 from torch import utils
 from lightning.pytorch.loggers import TensorBoardLogger
 
-from doppelganger.utils.utils_data import get_dataset
-from doppelganger.utils.utils_train import get_model
-from doppelganger.etl.prep_dataset_tabular import ImputeScaleCategorize
+from dpplgnger.utils.utils_data import get_dataset
+from dpplgnger.utils.utils_train import get_model
+from dpplgnger.etl.prep_dataset_tabular import ImputeScaleCategorize
 
 import logging
 import json

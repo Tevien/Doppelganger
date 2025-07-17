@@ -2,7 +2,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='doppelganger',
+    name='dpplgngr',
     packages=find_packages(),
     version='0.1.0',
     description='Deep-learning automated twinning',

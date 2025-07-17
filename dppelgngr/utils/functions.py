@@ -1,7 +1,7 @@
 import dask.dataframe as dd
 import pandas as pd
 import logging
-from doppelganger.utils.definitions import ace_atc, beta_atc, make_classification_map
+from dpplgnger.utils.definitions import ace_atc, beta_atc, make_classification_map
 
 logger = logging.getLogger('luigi-interface')
 
