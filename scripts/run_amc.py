@@ -1,5 +1,25 @@
 from dpplgngr.etl.prep_dataset_tabular import ConvertLargeFiles, PreProcess
-import luigi
+
+# Try to import luigi, fallback to replacement if not available
+try:
+    import luigi
+    _using_luigi_replacement = False
+except ImportError:
+    from dpplgngr.utils.luigi_replacement import Task, Parameter, IntParameter, LocalTarget, build as luigi_build
+    # Create a mock luigi module for compatibility
+    class MockLuigi:
+        Task = Task
+        Parameter = Parameter
+        IntParameter = IntParameter
+        LocalTarget = LocalTarget
+        
+        @staticmethod
+        def build(*args, **kwargs):
+            return luigi_build(*args, **kwargs)
+    
+    luigi = MockLuigi()
+    _using_luigi_replacement = True
+
 import argparse
 
 # Set up the command line arguments
