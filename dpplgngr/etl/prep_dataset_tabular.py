@@ -1,6 +1,6 @@
-from dpplgnger.utils.utils_etl import file_size, return_subset, vals_to_cols
-from dpplgnger.utils.functions import transform_aggregations, merged_transforms
-from dpplgnger.etl.convert_to_parquet import convert
+from dpplgngr.utils.utils_etl import file_size, return_subset, vals_to_cols
+from dpplgngr.utils.functions import transform_aggregations, merged_transforms
+from dpplgngr.etl.convert_to_parquet import convert
 import dask.dataframe as dd
 from dask_ml.impute import SimpleImputer
 from dask_ml.preprocessing import StandardScaler

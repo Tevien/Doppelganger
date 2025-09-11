@@ -1,4 +1,4 @@
-from dpplgnger.models.vanilla_ae import VanillaLightning
+from dpplgngr.models.vanilla_ae import VanillaLightning
 
 def get_model(name, args):
     if name == "vanilla_ae":

@@ -1,4 +1,4 @@
-from dpplgnger.datasets.tabular import Tabular
+from dpplgngr.datasets.tabular import Tabular
 
 def get_dataset(name, args):
     if name == "tabular":
