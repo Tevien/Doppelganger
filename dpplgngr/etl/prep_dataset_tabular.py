@@ -11,6 +11,15 @@ import logging
 import json
 import os
 
+# Try to import snowpark
+try:
+    from snowflake.snowpark import Session
+    from snowflake.snowpark.functions import col
+    _snowpark_available = True
+except ImportError:
+    _snowpark_available = False
+    Session = None
+
 # Try to import luigi, fallback to replacement if not available
 try:
     import luigi
@@ -36,6 +45,28 @@ logger = logging.getLogger('luigi-interface')
 # meta data
 __author__ = 'SB'
 __date__ = '2023-09-25'
+
+def create_snowflake_session(connection_params):
+    """
+    Create a Snowflake session with the given connection parameters.
+    
+    Args:
+        connection_params (dict): Dictionary containing Snowflake connection parameters
+            - account: Snowflake account identifier
+            - user: Username
+            - password: Password
+            - role: Role to use
+            - warehouse: Warehouse to use
+            - database: Database to use
+            - schema: Default schema (optional)
+    
+    Returns:
+        snowflake.snowpark.Session: Configured Snowflake session
+    """
+    if not _snowpark_available:
+        raise ImportError("snowflake-snowpark-python is required for Snowflake integration")
+    
+    return Session.builder.configs(connection_params).create()
 
 def dask_shape(_df):
     a = _df.shape
@@ -99,9 +130,18 @@ class ConvertLargeFiles(luigi.Task):
 class PreProcess(luigi.Task):
     lu_output_path = luigi.Parameter(default='preprocessed.parquet')
     etl_config = luigi.Parameter(default="config/etl.json")
+    snowpark_session = luigi.Parameter(default=None)
 
     def requires(self):
-        return ConvertLargeFiles(etl_config=self.etl_config)
+        # Only require ConvertLargeFiles if not using Snowflake
+        with open(self.etl_config, 'r') as f:
+            input_json = json.load(f)
+        source = input_json.get('SOURCE', 'FILE')
+        
+        if source == 'SNOWFLAKE':
+            return []
+        else:
+            return ConvertLargeFiles(etl_config=self.etl_config)
     
     def output(self):
         with open(self.etl_config, 'r') as f:
@@ -113,6 +153,56 @@ class PreProcess(luigi.Task):
         print(f"Output directory: {outdir}")
         print(f"Output path: {self.lu_output_path}")
         return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
+    
+    def load_snowflake_data(self, session, schema, table_name, columns):
+        """Load data from Snowflake table"""
+        if not _snowpark_available:
+            raise ImportError("snowflake-snowpark-python is required for Snowflake integration")
+        
+        # Build the table reference
+        table_ref = f"{schema}.{table_name}"
+        
+        # Load the table
+        df_snow = session.table(table_ref)
+        
+        # Select only the required columns if specified
+        if isinstance(columns, list) and len(columns) > 0:
+            # Handle simple column selection
+            if all(isinstance(c, str) for c in columns):
+                df_snow = df_snow.select([col(c) for c in columns])
+        
+        # Convert to pandas DataFrame for compatibility with existing processing
+        df_pandas = df_snow.to_pandas()
+        
+        # Convert to Dask DataFrame
+        df_dask = dd.from_pandas(df_pandas, npartitions=3)
+        
+        return df_dask
+
+    def get_data_source_config(self, input_json):
+        """Get the appropriate data source configuration based on SOURCE setting"""
+        source = input_json.get('SOURCE', 'FILE')
+        
+        if source == 'SNOWFLAKE':
+            # Use the new Snowflake table configuration
+            data_configs = {}
+            snowflake_config = input_json.get('snowflake_config', {})
+            
+            for key, value in input_json.items():
+                if key.startswith('Datatools4heart_') and isinstance(value, dict):
+                    # This is a Snowflake table configuration
+                    data_configs[key] = {
+                        'table_name': value['table_name'],
+                        'columns': value['columns']
+                    }
+            return data_configs, snowflake_config
+        else:
+            # Extract file-based configurations from the original structure
+            data_configs = {}
+            for key, value in input_json.items():
+                if key.endswith('.feather') or key.endswith('.csv') or key.endswith('.parquet'):
+                    data_configs[key] = value
+            return data_configs, None
     
     def apply_transformations(self, s_df, _config, total_cols, transform_type="PreTransforms"):
         # See if any column names specify aggregations
@@ -171,127 +261,181 @@ class PreProcess(luigi.Task):
         with open(self.etl_config, 'r') as f:
             input_json = json.load(f)
 
-        filenames = input_json.keys()
-
-        # Keep only names with normal extensions
-        filenames = [f for f in filenames if any([f.endswith(ext) for ext in ['.csv', '.csv.gz', '.parquet', '.feather']])]
-        path = input_json['absolute_path']
-        filenames = [os.path.join(path, f) for f in filenames]
+        source = input_json.get('SOURCE', 'FILE')
+        data_configs, snowflake_config = self.get_data_source_config(input_json)
         
-        # Load converted json
-        with self.input().open('r') as f:
-            converted_json = json.load(f)
-        filenames_to_convert = converted_json.keys()
-        
-        # Replace with converted filenames
-        new_filenames = [converted_json[f] if f in filenames_to_convert else f for f in filenames]
-
         # Open empty dask dataframe
         df_pp = None
 
-        logging.info(f"Filenames: {filenames}")
-        # Create the requested columns from each filename
-        for o, f in zip(filenames, new_filenames):
-            # First check if we have this file checkpointed
-            current_name = f.split("/")[-1].split(".")[0]
-            saved_loc = f"{input_json['preprocessing']}/{current_name}_preprocessed.parquet"
-            # If file exists then load it
-            if os.path.exists(saved_loc):
-                print(f"*** Loading {saved_loc} ***")
-                df = dd.read_parquet(saved_loc, npartitions=3) #TODO: Make this configurable
-                print(df.head())
-                print("Index: ", df.index.name)
-                print("Columns: ", df.columns)
-                df_pp_20 = df.head(20)
-                df_pp = self.safe_merge(df, df_pp)
-                continue
-
-            print(f"*** Processing {f} ***")
-            vals = input_json[o.split("/")[-1]]
-            index = vals[0]
-            cols = vals[1:]
-
-            print(f"Index: {index}")
-            print(f"Columns: {cols}")
-
-            # are any items in the list dictionaries?
-            col_extract = not any([isinstance(v, dict) for v in vals])
-            logger.info(f"*** Column extraction: {col_extract} ***")
-            if col_extract:
-                df = return_subset(f, cols, index_col=index)
-            else:
-                """ Assume form of cols is:
-                ["col_name", {"val_name": {"type1": name1, "type2": name2}}, ["optional_extra_col"]]
-                """
-
-                if '.parquet' in f:
-                    df = dd.read_parquet(f)
-                elif '.feather' in f:
-                    df = dd.from_pandas(pd.read_feather(f), npartitions=3)
-                else:
-                    df = dd.read_csv(f, blocksize=blocksize)
-
-                # Apply initial transformations
-                print(df.head(20))
-                print(f"Columns: {df.columns.tolist()}")
-                df = self.apply_transformations(df, input_json, cols, transform_type="InitTransforms")
-                print(df.head(20))
-                print(f"Columns: {df.columns.tolist()}")
+        if source == 'SNOWFLAKE':
+            if not self.snowpark_session:
+                raise ValueError("Snowpark session is required when SOURCE is SNOWFLAKE")
+            
+            session = self.snowpark_session
+            input_schema = snowflake_config.get('input_schema', 'RAW_DATA')
+            
+            logging.info(f"Processing Snowflake tables from schema: {input_schema}")
+            
+            # Process each Snowflake table
+            for table_key, table_config in data_configs.items():
+                table_name = table_config['table_name']
+                cols = table_config['columns']
                 
-                col_name = cols[0]
-                val_name = list(cols[1].keys())[0]
-                col_map = cols[1][val_name]
-                extra_cols = None
-                if len(cols) == 3:
-                    extra_cols = cols[2]
-                if len(cols) > 3:
-                    raise ValueError("Too many columns specified")
-                df = vals_to_cols(df, index_col=index, code_col=col_name, value_col=val_name,
-                code_map=col_map, extra_cols=extra_cols)
-            assert df.index.unique, "Index is not unique"
+                current_name = table_key.replace('Datatools4heart_', '')
+                saved_loc = f"{input_json['preprocessing']}/{current_name}_preprocessed.parquet"
+                
+                # Check if we have this data checkpointed
+                if os.path.exists(saved_loc):
+                    print(f"*** Loading {saved_loc} ***")
+                    df = dd.read_parquet(saved_loc, npartitions=3)
+                    df_pp = self.safe_merge(df, df_pp)
+                    continue
 
+                print(f"*** Processing Snowflake table {table_name} ***")
+                
+                # Load data from Snowflake
+                df = self.load_snowflake_data(session, input_schema, table_name, cols)
+                
+                # Set index if specified
+                index = None
+                if isinstance(cols, list) and len(cols) > 0:
+                    index = cols[0]  # First column as index
+                    if index in df.columns:
+                        df = df.set_index(index)
 
-            df_20 = df.head(20)
-            logging.info("df pre transform:")
-            logging.info(df_20)
+                # Apply transformations
+                df = self.apply_transformations(df, input_json, cols, transform_type="InitTransforms")
+                df = self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
+                
+                # For Snowflake, don't save checkpoints locally
+                # df.to_parquet(saved_loc)  # Skip local checkpoint for Snowflake
+                df_pp = self.safe_merge(df, df_pp)
+                
+        else:
+            # Original file-based processing
+            filenames = list(data_configs.keys())
+            # Keep only names with normal extensions
+            filenames = [f for f in filenames if any([f.endswith(ext) for ext in ['.csv', '.csv.gz', '.parquet', '.feather']])]
+            path = input_json['absolute_path']
+            filenames = [os.path.join(path, f) for f in filenames]
+            
+            # Load converted json if available
+            converted_json = {}
+            if hasattr(self, 'input') and self.input():
+                with self.input().open('r') as f:
+                    converted_json = json.load(f)
+            
+            filenames_to_convert = converted_json.keys()
+            # Replace with converted filenames
+            new_filenames = [converted_json[f] if f in filenames_to_convert else f for f in filenames]
 
-            df = self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
+            logging.info(f"Filenames: {filenames}")
+            # Create the requested columns from each filename
+            for o, f in zip(filenames, new_filenames):
+                # First check if we have this file checkpointed
+                current_name = f.split("/")[-1].split(".")[0]
+                saved_loc = f"{input_json['preprocessing']}/{current_name}_preprocessed.parquet"
+                # If file exists then load it
+                if os.path.exists(saved_loc):
+                    print(f"*** Loading {saved_loc} ***")
+                    df = dd.read_parquet(saved_loc, npartitions=3)
+                    df_pp = self.safe_merge(df, df_pp)
+                    continue
 
-            # Add new cols to the dataframe and join with subject_id
-            #df_100 = df.head(100)
-            #print(df_100)
-            df_20 = df.head(20)
-            print(df_20)
-            logging.info("df post transform:")
-            logging.info(df_20)
-            # Checkpoint pre-concat
-            # Save current transformed dataframe
-            df.to_parquet(saved_loc)
+                print(f"*** Processing {f} ***")
+                vals = data_configs[o.split("/")[-1]]
+                index = vals[0]
+                cols = vals[1:]
 
-            df_pp_20 = df.head(20)
-            df_pp = self.safe_merge(df, df_pp)
+                print(f"Index: {index}")
+                print(f"Columns: {cols}")
+
+                # are any items in the list dictionaries?
+                col_extract = not any([isinstance(v, dict) for v in vals])
+                logger.info(f"*** Column extraction: {col_extract} ***")
+                if col_extract:
+                    df = return_subset(f, cols, index_col=index)
+                else:
+                    """ Assume form of cols is:
+                    ["col_name", {"val_name": {"type1": name1, "type2": name2}}, ["optional_extra_col"]]
+                    """
+
+                    if '.parquet' in f:
+                        df = dd.read_parquet(f)
+                    elif '.feather' in f:
+                        df = dd.from_pandas(pd.read_feather(f), npartitions=3)
+                    else:
+                        df = dd.read_csv(f, blocksize='64MB')  # Fixed blocksize
+
+                    # Apply initial transformations
+                    df = self.apply_transformations(df, input_json, cols, transform_type="InitTransforms")
+                    
+                    col_name = cols[0]
+                    val_name = list(cols[1].keys())[0]
+                    col_map = cols[1][val_name]
+                    extra_cols = None
+                    if len(cols) == 3:
+                        extra_cols = cols[2]
+                    if len(cols) > 3:
+                        raise ValueError("Too many columns specified")
+                    df = vals_to_cols(df, index_col=index, code_col=col_name, value_col=val_name,
+                    code_map=col_map, extra_cols=extra_cols)
+                
+                assert df.index.unique, "Index is not unique"
+
+                df = self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
+
+                # Checkpoint pre-concat only if not using SNOWFLAKE
+                if input_json.get("SOURCE", "FILE") != "SNOWFLAKE":
+                    df.to_parquet(saved_loc)
+                df_pp = self.safe_merge(df, df_pp)
         
         # Merged transforms
         end_transforms = input_json.get('MergedTransforms', None)
         if end_transforms:
             df_pp = merged_transforms(df_pp, end_transforms)
 
-        
         # Reduce to final specified columns
         df_pp = df_pp[input_json["final_cols"]]
         print(df_pp.head(20))
         print(f"Final shape: {df_pp.shape}")
         
-        df_pp.to_parquet(self.output())
+        # Handle output based on source
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            # Write directly to Snowflake without local backup
+            snowflake_config = input_json.get('snowflake_config', {})
+            output_schema = snowflake_config.get('output_schema', 'PROCESSED_DATA')
+            output_table = f"{input_json['name']}_preprocessed"
+            
+            # Convert to pandas for Snowflake write
+            df_pandas = df_pp.compute()
+            
+            # Write to Snowflake
+            session = self.snowpark_session
+            snow_df = session.create_dataframe(df_pandas)
+            
+            # Write to table (overwrite mode)
+            snow_df.write.mode("overwrite").save_as_table(f"{output_schema}.{output_table}")
+            print(f"Preprocessed data written to Snowflake table: {output_schema}.{output_table}")
+            
+            # Create a dummy local target for Luigi compatibility but don't write actual data
+            os.makedirs(os.path.dirname(self.output().path), exist_ok=True)
+            with open(self.output().path, 'w') as f:
+                f.write(f"Data written to Snowflake: {output_schema}.{output_table}")
+        else:
+            # Save to local parquet file for file-based processing
+            df_pp.to_parquet(self.output().path)
+        
         print("Success")
 
 
 class ImputeScaleCategorize(luigi.Task):
     lu_output_path = luigi.Parameter(default='preprocessed_imputed.parquet')
     etl_config = luigi.Parameter(default="config/etl.json")
+    snowpark_session = luigi.Parameter(default=None)
 
     def requires(self):
-        return PreProcess(etl_config=self.etl_config)
+        return PreProcess(etl_config=self.etl_config, snowpark_session=self.snowpark_session)
     
     def output(self):
         with open(self.etl_config, 'r') as f:
@@ -300,12 +444,13 @@ class ImputeScaleCategorize(luigi.Task):
         if not outdir:
             name = input_json.get('name', None)
             outdir = f"data/{name}/preprocessing"
-        return luigi.LocalTarget(os.path.join(prefix, self.lu_output_path))
+        return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
     
     def run(self):
         with open(self.etl_config, 'r') as f:
             input_json = json.load(f)
         name = input_json['name']
+        source = input_json.get('SOURCE', 'FILE')
 
         # TODO: Fix for preprocessing locs
         assert all(x in list(input_json.keys()) for x in ["scaler", "imputer"]), "Scaler and imputer not specified"
@@ -319,7 +464,7 @@ class ImputeScaleCategorize(luigi.Task):
             load_imp = True
             imputer = load(imputer_path)
         
-        ddf = dd.read_parquet(self.input())
+        ddf = dd.read_parquet(self.input().path)
 
         # Make cells with underscores nan
         to_nan = ["", "__", "_", "___"]
@@ -361,8 +506,48 @@ class ImputeScaleCategorize(luigi.Task):
         if not load_imp:
             dump(imputer, imputer_path)
         
-        ddf.to_parquet(self.output().path)
+        # Handle output based on source
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            # Write only to Snowflake, no local backup
+            snowflake_config = input_json.get('snowflake_config', {})
+            output_schema = snowflake_config.get('output_schema', 'PROCESSED_DATA')
+            output_table = f"{name}_preprocessed_imputed"
+            
+            # Convert to pandas for Snowflake write
+            df_pandas = ddf.compute()
+            
+            # Write to Snowflake
+            session = self.snowpark_session
+            snow_df = session.create_dataframe(df_pandas)
+            
+            # Write to table (overwrite mode)
+            snow_df.write.mode("overwrite").save_as_table(f"{output_schema}.{output_table}")
+            print(f"Final processed data written to Snowflake table: {output_schema}.{output_table}")
+            
+            # Create a dummy local target for Luigi compatibility but don't write actual data
+            os.makedirs(os.path.dirname(self.output().path), exist_ok=True)
+            with open(self.output().path, 'w') as f:
+                f.write(f"Data written to Snowflake: {output_schema}.{output_table}")
+        else:
+            # Save to local parquet file for file-based processing
+            ddf.to_parquet(self.output().path)
+        
+        print("Success")
         
 
-if __name__ == '__main__':    
+if __name__ == '__main__':
+    # Example usage with Snowflake
+    # session = Session.builder.configs({
+    #     "account": "your_account",
+    #     "user": "your_user", 
+    #     "password": "your_password",
+    #     "role": "your_role",
+    #     "warehouse": "your_warehouse",
+    #     "database": "your_database"
+    # }).create()
+    
+    # For file-based processing (default)
     luigi.build([ConvertLargeFiles(), PreProcess(), ImputeScaleCategorize()], workers=2, local_scheduler=True)
+    
+    # For Snowflake processing, pass the session:
+    # luigi.build([PreProcess(snowpark_session=session), ImputeScaleCategorize(snowpark_session=session)], workers=2, local_scheduler=True)
