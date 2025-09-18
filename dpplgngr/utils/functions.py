@@ -220,6 +220,76 @@ def dropna(_df, **kwargs):
     _df = _df.dropna(subset=subset)
     return _df
 
+def pattern_match(_df, **kwargs):
+    """
+    Create multiple binary columns based on pattern matching in a search column.
+    
+    Parameters:
+    - id_col: Column to group by
+    - search_col: Column to search for patterns
+    - pattern_dict: Dictionary where keys are output column names and values are patterns to match
+    - case_sensitive: Whether matching should be case sensitive (default: False)
+    - group_by_id: Whether to group by id_col and take max (default: True)
+    """
+    id_col = kwargs.get('id_col', None)
+    search_col = kwargs.get('search_col', None)
+    pattern_dict = kwargs.get('pattern_dict', None)
+    case_sensitive = kwargs.get('case_sensitive', False)
+    group_by_id = kwargs.get('group_by_id', True)
+    
+    if id_col is None:
+        raise ValueError("id_col must be provided")
+    if search_col is None:
+        raise ValueError("search_col must be provided")
+    if pattern_dict is None:
+        raise ValueError("pattern_dict must be provided")
+    
+    # Fill NaN values in search column
+    _df = _df.fillna(value={search_col: ""})
+    
+    # Create binary columns for each pattern
+    for out_col, pattern in pattern_dict.items():
+        if case_sensitive:
+            _df[out_col] = _df[search_col].str.contains(pattern, na=False, regex=True).astype(int)
+        else:
+            _df[out_col] = _df[search_col].str.contains(pattern, case=False, na=False, regex=True).astype(int)
+    
+    # Handle index reset if needed
+    reset = False
+    if id_col == _df.index.name:
+        _df = _df.reset_index(drop=False)
+        logging.info("Id col is the index")
+        reset = True
+    
+    # Optionally group by id_col and take max
+    if group_by_id:
+        pattern_cols = list(pattern_dict.keys())
+        
+        # Simple approach: aggregate all needed columns at once
+        agg_dict = {search_col: 'first'}  # Keep first occurrence of search column
+        agg_dict.update({col: 'max' for col in pattern_cols})  # Max for pattern columns
+        
+        # Get all other columns that aren't pattern columns or search/id columns
+        other_cols = [col for col in _df.columns if col not in pattern_cols + [id_col, search_col]]
+        if other_cols:
+            agg_dict.update({col: 'first' for col in other_cols})  # Keep first for other columns
+        
+        _df_result = _df.groupby(id_col).agg(agg_dict).reset_index()
+        
+        if reset:
+            _df_result = _df_result.set_index(id_col)
+        
+        # Verify new columns by printing first few rows
+        print(f"Pattern match result sample:\n{_df_result.head()}")
+        return _df_result
+    else:
+        # Return the dataframe without grouping
+        if reset:
+            _df = _df.set_index(id_col)
+
+        print(f"Pattern match result sample:\n{_df.head()}")
+        return _df
+
 # Create a dictionary that maps strings to functions
 function_dict = {
     "datetime_keepfirst": datetime_keepfirst,
@@ -235,6 +305,7 @@ function_dict = {
     "dropna": dropna,
     "chain": chain,
     "classify": classify,
+    "pattern_match": pattern_match,
 }
 
 def function_to_execute(config_parameter):
