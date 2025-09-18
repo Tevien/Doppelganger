@@ -139,6 +139,10 @@ def beta(_df, **kwargs):
 
     return _df_beta
 
+
+# TODO: There is an issue in which if you try to do multiple classifications in the same chain
+# it takes only the first one if there are for example overlapping ICD 10 codes then 
+# the second classification will never make it to the final columns
 def classify(_df, **kwargs):
     classification_map = kwargs.get('classification_map', None) # dictionary of {col: {class1: [values], class2: [values]}}
     out_col = kwargs.get('out_col', None)

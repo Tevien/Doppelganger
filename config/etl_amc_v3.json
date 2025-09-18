@@ -3,7 +3,7 @@
     "description": "Preprocessing of AMC data",
 
     "absolute_path": "/scratch-shared/sbenson/FeatherFormat/",
-    "preprocessing": "/scratch-shared/sbenson/preprocessing_v3",
+    "preprocessing": "/scratch-shared/sbenson/preprocessing_test",
 
     "Datatools4heart_Patient.feather": ["pseudo_id", "Geboortejaar", 
     "Geboortemaand", "Geslacht", "Overlijdensdatum"],
@@ -11,19 +11,14 @@
     "Datatools4heart_Tabakgebruik.feather": ["pseudo_id", "IsHuidigeRoker", "IsVoormaligRoker", "Patientcontactid"],
     "Datatools4heart_MetingBMI.feather": ["pseudo_id", "Patientcontactid", "BMI"],
     "Datatools4heart_MetingBloeddruk.feather": ["pseudo_id", "PatientContactId", "SystolischeBloeddrukWaarde", "DiastolischeBloeddrukWaarde"],
-    "Datatools4heart_VoorgeschiedenisMedisch.feather": ["pseudo_id", "diagnosecode_classified", {"diagnosecode": {"t2dm": "t2dm", "af": "af", "chronic_ischemic_hd": "chronic_ischemic_hd", "acute_mi": "acute_mi"}}, ["IndicatieDatumVaststelling"]],
+    "Datatools4heart_VoorgeschiedenisMedisch.feather": ["pseudo_id", "diagnosecode_classified", {"diagnosecode": {"t2dm": "t2dm", "af": "af", "acute_mi": "acute_mi"}}, ["IndicatieDatumVaststelling"]],
+    "Datatools4heart_VoorgeschiedenisFamilie.feather": ["pseudo_id", "FamilieVoorgeschiedenis", "hf_fam"],
     "Datatools4heart_MedicatieToediening.feather": ["pseudo_id", "ATCKlasseCode_classified", {"ATCKlasseCode": {"ace": "ace", "beta": "beta"}}, ["ToedieningsDatum"]],
     "Datatools4heart_Labuitslag.feather": ["pseudo_id", "BepalingCode", {"UitslagNumeriek": {"RKRE;BL": "creatinine", "RHDL;BL": "hdl_cholesterol", "RCHO;BL": "total_cholesterol"}}, ["MateriaalAfnameDatum"]],
+    "merged_nyha_lvef_DT.feather": ["pseudo_id", "Measurement Type", {"Value": {"NYHAClass": "nyha", "LVEFValue": "lvef"}}, ["RecordDate"]],
 
-    "categories": {"gender": ["M", "F"]},
-    "scaler": "scaler_amc.h5",
-    "imputer": "imputer_amc.h5",
     "final_cols": ["Geslacht", "AgeAtOpname", "IsHuidigeRoker", "hdl_cholesterol", "total_cholesterol", "OpnameDatum",
-    "BMI", "SystolischeBloeddrukWaarde", "DiastolischeBloeddrukWaarde", "ace", "time", "beta", "creatinine", "t2dm", "chronic_ischemic_hd", "acute_mi", "af"],
-    "comment_gencols": ["age_###", "bmi_###", "sbp_###", "dbp_###", "hdl_cholesterol_###", "total_cholesterol_###", "rf_smoking_###",
-    "sex_###", "hypertension_threshold_###", "t2dm_threshold_###", "diabetes_threshold_###", "ht_medication_###", 
-    "hf_threshold_***", "arthritis_threshold_***", "fam_history_***", 
-    "rf_ethnicity_***", "townsend_deprivation_index_***"],
+    "BMI", "SystolischeBloeddrukWaarde", "DiastolischeBloeddrukWaarde", "ace", "time", "beta", "creatinine", "t2dm", "acute_mi", "af", "nyha", "lvef", "hf_fam"],
 
     "InitTransforms": {
         "ATCKlasseCode_classified": {
@@ -38,10 +33,22 @@
         "diagnosecode_classified": {
             "func": "classify",
             "kwargs": {
-                "classification_map": ["t2dm", "af", "chronic_ischemic_hd", "acute_mi"],
+                "classification_map": ["t2dm", "af", "acute_mi"],
                 "input_col": "diagnosecode",
                 "out_col": "diagnosecode_classified",
                 "id_col": "pseudo_id"
+            }
+        },
+        "FamilieVoorgeschiedenis": {
+            "func": "pattern_match",
+            "kwargs": {
+                "id_col": "pseudo_id",
+                "search_col": "FamilieVoorgeschiedenis",
+                "pattern_dict": {
+                    "hf_fam": "hart|plots"
+                },
+                "case_sensitive": false,
+                "group_by_id": true
             }
         }
     },

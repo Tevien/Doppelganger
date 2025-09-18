@@ -27,13 +27,13 @@ def file_size(file_path):
     print (file_path)
     return convert_bytes_to_mb(file_info.st_size)
 
-def return_subset(filename, cols, index_col=None, blocksize=10000):
+def return_subset(df, cols, index_col=None, blocksize=10000):
     """
     this function will return a subset of the dataframe
 
     Args:
-    filename: str
-        The filename of the dataframe
+    df: dask.dataframe.DataFrame
+        The input dataframe
     cols: list
         The columns to return
     index_col: str
@@ -41,14 +41,9 @@ def return_subset(filename, cols, index_col=None, blocksize=10000):
     blocksize: int
         The blocksize to use
     """
-    # Is the file a parquet file?
-    if '.parquet' in filename:
-        df = dd.read_parquet(filename, columns=cols+[index_col])
-    elif '.feather' in filename:
-        df = dd.from_pandas(pd.read_feather(filename, columns=cols+[index_col]), npartitions=3)
-    else:
-        df = dd.read_csv(filename, blocksize=blocksize)
-        df = df.loc[:, cols+[index_col]]
+
+    # Restrict to specified columns
+    df = df.loc[:, cols+[index_col]]
 
     if index_col is not None:
         df = df.set_index(index_col)

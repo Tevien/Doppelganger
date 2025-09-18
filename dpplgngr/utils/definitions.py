@@ -202,7 +202,7 @@ angina_icd9 = [
 # Myocardial Infarction - ICD-10 (EXPANDED with complete subcodes)
 mi_icd10 = [
     # I21 - Acute myocardial infarction
-    "I21.01", "I21.02", "I21.09",  # STEMI of anterior wall
+    "I21.1", "I21.2", "I21.9",  # STEMI of anterior wall
     "I21.11", "I21.19",            # STEMI of inferior wall
     "I21.21", "I21.29",            # STEMI of other sites
     "I21.3",                       # STEMI of unspecified site
@@ -231,7 +231,7 @@ mi_icd9 = [
 
 # Chronic Ischemic Heart Disease
 chron_ischemic_hd_icd_10 = ["I20.0", "I20.1", "I20.2", "I20.8", "I20.9",
-                            "I21.01", "I21.02", "I21.09", "I21.11", "I21.19", "I21.21", "I21.29", "I21.3", "I21.4", "I21.9", "I21.A1",
+                            "I21.1", "I21.2", "I21.9", "I21.11", "I21.19", "I21.21", "I21.29", "I21.3", "I21.4", "I21.9", "I21.A1",
                             "I22.0", "I22.1", "I22.2", "I22.8", "I22.9",
                             "I23.0", "I23.1", "I23.2", "I23.3", "I23.4", "I23.5", "I23.6", "I23.7", "I23.8",
                             "I24.0", "I24.1", "I24.8", "I24.9",
@@ -278,21 +278,21 @@ diabetes_icd10 = [
     "E10.51", "E10.59", "E10.621", "E10.622", "E10.628", "E10.630", "E10.638", "E10.641",
     "E10.649", "E10.65", "E10.69", "E10.8",
     # E11 - Type 2 diabetes mellitus (key subcodes)
-    "E11.9", "E11.00", "E11.01", "E11.10", "E11.11", "E11.21", "E11.22", "E11.29", 
+    "E11.9", "E11.0", "E11.1", "E11.10", "E11.11", "E11.21", "E11.22", "E11.29", 
     "E11.311", "E11.319", "E11.321", "E11.329", "E11.331", "E11.339", "E11.351", "E11.359",
     "E11.40", "E11.41", "E11.42", "E11.43", "E11.44", "E11.49", "E11.51", "E11.52", "E11.59",
     "E11.610", "E11.618", "E11.620", "E11.621", "E11.622", "E11.628", "E11.630", "E11.638",
     "E11.641", "E11.649", "E11.65", "E11.69", "E11.8",
     # E12 - Malnutrition-related diabetes mellitus (key subcodes)
-    "E12.9", "E12.00", "E12.01", "E12.10", "E12.11", "E12.21", "E12.22", "E12.29",
+    "E12.9", "E12.0", "E12.1", "E12.10", "E12.11", "E12.21", "E12.22", "E12.29",
     "E12.40", "E12.41", "E12.42", "E12.43", "E12.44", "E12.49", "E12.51", "E12.52", "E12.59",
     "E12.621", "E12.622", "E12.628", "E12.641", "E12.649", "E12.65", "E12.69", "E12.8",
-    # E13 - Other specified diabetes mellitus (key subcodes) 
-    "E13.9", "E13.00", "E13.01", "E13.10", "E13.11", "E13.21", "E13.22", "E13.29",
+    # E13 - Other specified diabetes mellitus (key subcodes)
+    "E13.9", "E13.0", "E13.1", "E13.10", "E13.11", "E13.21", "E13.22", "E13.29",
     "E13.40", "E13.41", "E13.42", "E13.43", "E13.44", "E13.49", "E13.51", "E13.52", "E13.59",
     "E13.621", "E13.622", "E13.628", "E13.641", "E13.649", "E13.65", "E13.69", "E13.8",
     # E14 - Unspecified diabetes mellitus (key subcodes)
-    "E14.9", "E14.00", "E14.01", "E14.10", "E14.11", "E14.21", "E14.22", "E14.29",
+    "E14.9", "E14.0", "E14.1", "E14.10", "E14.11", "E14.21", "E14.22", "E14.29",
     "E14.40", "E14.41", "E14.42", "E14.43", "E14.44", "E14.49", "E14.51", "E14.52", "E14.59",
     "E14.621", "E14.622", "E14.628", "E14.641", "E14.649", "E14.65", "E14.69", "E14.8"
 ]
@@ -480,48 +480,48 @@ defs_map = {
 }
 
 def make_classification_map(l_keys):
-"""
-Create a classification map from a list of keys.
-The keys are used to create a dictionary where the key is the classification name
-and the value is a list of values that belong to that classification.
-"""
-classification_map = {}
-for key in l_keys:
-if key in defs_map:
-classification_map[key] = defs_map[key]
-else:
-raise ValueError(f"Key {key} not found in defs_map")
-return classification_map
+    """
+    Create a classification map from a list of keys.
+    The keys are used to create a dictionary where the key is the classification name
+    and the value is a list of values that belong to that classification.
+    """
+    classification_map = {}
+    for key in l_keys:
+        if key in defs_map:
+            classification_map[key] = defs_map[key]
+        else:
+            raise ValueError(f"Key {key} not found in defs_map")
+    return classification_map
 
 def get_hf_medication_bundle():
-"""
-Return the guideline-directed medical therapy (GDMT) bundle for heart failure.
-Based on current ESC guidelines.
-"""
-return {
-"ace_arb_arni": ace_atc + arb_atc + arni_atc,
-"beta_blockers": beta_all_atc,
-"mra": mra_atc,
-"sglt2i": sglt2_hf_atc
-}
+    """
+    Return the guideline-directed medical therapy (GDMT) bundle for heart failure.
+    Based on current ESC guidelines.
+    """
+    return {
+        "ace_arb_arni": ace_atc + arb_atc + arni_atc,
+        "beta_blockers": beta_all_atc,
+        "mra": mra_atc,
+        "sglt2i": sglt2_hf_atc
+        }
 
 def get_ckd_stages():
-"""
-Return eGFR thresholds for CKD staging as per protocol.
-"""
-return {
-"normal": ">=90",
-"mild": "60-89",
-"moderate": "15-59",
-"advanced": "<15"
-}
+    """
+    Return eGFR thresholds for CKD staging as per protocol.
+    """
+    return {
+    "normal": ">=90",
+    "mild": "60-89",
+    "moderate": "15-59",
+    "advanced": "<15"
+    }
 
 def get_hyperkalemia_stages():
-"""
-Return potassium level thresholds for hyperkalemia staging as per protocol.
-"""
-return {
-"mild": "5.0-5.5 mmol/L",
-"moderate": "5.5-6.0 mmol/L",
-"severe": ">6.0 mmol/L"
-}
+    """
+    Return potassium level thresholds for hyperkalemia staging as per protocol.
+    """
+    return {
+    "mild": "5.0-5.5 mmol/L",
+    "moderate": "5.5-6.0 mmol/L",
+    "severe": ">6.0 mmol/L"
+    }

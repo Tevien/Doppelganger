@@ -350,25 +350,25 @@ class PreProcess(luigi.Task):
                 print(f"Index: {index}")
                 print(f"Columns: {cols}")
 
+                if '.parquet' in f:
+                    df = dd.read_parquet(f)
+                elif '.feather' in f:
+                    df = dd.from_pandas(pd.read_feather(f), npartitions=3)
+                else:
+                    df = dd.read_csv(f, blocksize='64MB')  # Fixed blocksize
+
+                # Apply initial transformations
+                df = self.apply_transformations(df, input_json, cols, transform_type="InitTransforms")
+
                 # are any items in the list dictionaries?
                 col_extract = not any([isinstance(v, dict) for v in vals])
                 logger.info(f"*** Column extraction: {col_extract} ***")
                 if col_extract:
-                    df = return_subset(f, cols, index_col=index)
+                    df = return_subset(df, cols, index_col=index)
                 else:
                     """ Assume form of cols is:
                     ["col_name", {"val_name": {"type1": name1, "type2": name2}}, ["optional_extra_col"]]
                     """
-
-                    if '.parquet' in f:
-                        df = dd.read_parquet(f)
-                    elif '.feather' in f:
-                        df = dd.from_pandas(pd.read_feather(f), npartitions=3)
-                    else:
-                        df = dd.read_csv(f, blocksize='64MB')  # Fixed blocksize
-
-                    # Apply initial transformations
-                    df = self.apply_transformations(df, input_json, cols, transform_type="InitTransforms")
                     
                     col_name = cols[0]
                     val_name = list(cols[1].keys())[0]
