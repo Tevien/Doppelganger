@@ -1,5 +1,6 @@
 from dpplgngr.etl.prep_dataset_tabular import ConvertLargeFiles, PreProcess, TuplesProcess
 from dpplgngr.train.sdv import SDVGen
+from dpplgngr.scores.audit import SyntheticDataAudit
 
 # Try to import luigi, fallback to replacement if not available
 try:
@@ -36,6 +37,7 @@ gen_config = args.genconfig
 luigi.build([ConvertLargeFiles(etl_config=etl_config), 
              PreProcess(etl_config=etl_config),
              TuplesProcess(etl_config=etl_config),
-             SDVGen(gen_config=gen_config, etl_config=etl_config)
+             SDVGen(gen_config=gen_config, etl_config=etl_config),
+             SyntheticDataAudit(gen_config=gen_config, etl_config=etl_config)
              ], 
 workers=2, local_scheduler=True, no_lock=False, log_level='INFO')
