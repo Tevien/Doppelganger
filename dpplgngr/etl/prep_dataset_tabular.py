@@ -1,4 +1,4 @@
-from dpplgngr.utils.utils_etl import file_size, return_subset, vals_to_cols, to_datetime
+from dpplgngr.utils.utils_etl import file_size, return_subset, vals_to_cols, to_datetime, analyze_dataframe
 from dpplgngr.utils.functions import transform_aggregations, merged_transforms
 from dpplgngr.etl.convert_to_parquet import convert
 import dask.dataframe as dd
@@ -240,7 +240,7 @@ class PreProcess(luigi.Task):
         # Apply aggregations
         if cols_for_aggregations:
             s_df = transform_aggregations(s_df, aggs, cols_for_aggregations)
-        return s_df33
+        return s_df
     
     def safe_merge(self, _df, _df_pp):
         # remove any of ["Patientcontactid", "PatientContactId"] from _df if it exists
@@ -566,6 +566,8 @@ class TuplesProcess(luigi.Task):
         for t in tuple_cols_anybefore:
             ddf[t + '_any_before'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, False), meta=(t + '_any_before', 'float32'))
 
+        # Make analysis of dataframe
+        analyze_dataframe(ddf, prefix="TUPLEPROCESS")
 
         ddf.to_parquet(self.output().path)
         logging.info("Success")

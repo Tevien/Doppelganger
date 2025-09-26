@@ -96,3 +96,42 @@ def to_datetime(date):
     timestamp = ((date - np.datetime64('1970-01-01T00:00:00'))
                  / np.timedelta64(1, 's'))
     return datetime.utcfromtimestamp(timestamp)
+
+# Function to perform analysis on dask dataframe in terms of missingness, types, and distributions
+# Send results to logger
+def analyze_dataframe(df, sample_size=10000, prefix="PREPROCESS"):
+    """
+    Analyzes a dask dataframe and prints out information about missingness, types, and distributions.
+    
+    Args:
+        df (dask.dataframe.DataFrame): The input dask dataframe to analyze.
+        sample_size (int): The number of rows to sample for analysis.
+    """ 
+    logger.info(f"{prefix} - Analyzing dataframe...")
+    logger.info(f"{prefix} - Dataframe shape: {df.shape}")
+    logger.info(f"{prefix} - Dataframe columns: {df.columns.tolist()}")
+
+    # Compute basic statistics
+    desc = df.describe().compute()
+    logger.info(f"{prefix} - Basic statistics:")
+    logger.info(desc)
+    
+    # Check for missing values
+    missing = df.isnull().sum().compute()
+    logger.info(f"{prefix} - Missing values per column:")
+    logger.info(missing[missing > 0])
+    
+    # Sample data for distribution analysis
+    sample = df.sample(frac=min(sample_size / len(df), 1.0)).compute()
+    
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col].dtype):
+            logger.info(f"{prefix} - Distribution for numeric column '{col}':")
+            logger.info(sample[col].describe())
+        elif pd.api.types.is_categorical_dtype(df[col].dtype) or pd.api.types.is_object_dtype(df[col].dtype):
+            logger.info(f"{prefix} - Value counts for categorical column '{col}':")
+            logger.info(sample[col].value_counts().head(10))
+        else:
+            logger.info(f"{prefix} - Column '{col}' has unsupported dtype '{df[col].dtype}' for detailed analysis.")
+
+    logger.info(f"{prefix} - Analysis complete.")

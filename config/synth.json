@@ -1,0 +1,8 @@
+{
+    "input_file": "/scratch-shared/sbenson/preprocessing_test/preprocessed_tupleprocess.parquet",
+    "working_dir": "/scratch-shared/sbenson/synth_test",
+    "columns": ["Geslacht", "AgeAtOpname", "IsHuidigeRoker", "hdl_cholesterol", "total_cholesterol",
+    "BMI", "SystolischeBloeddrukWaarde", "DiastolischeBloeddrukWaarde", "ace", "time", "beta", "creatinine", "t2dm", "acute_mi", "af", "nyha", "lvef", "hf_fam"],
+    "num_points": 13278,
+    "synth_type": "GC"
+}
