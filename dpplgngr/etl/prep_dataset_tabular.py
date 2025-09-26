@@ -1,7 +1,8 @@
-from dpplgngr.utils.utils_etl import file_size, return_subset, vals_to_cols
+from dpplgngr.utils.utils_etl import file_size, return_subset, vals_to_cols, to_datetime
 from dpplgngr.utils.functions import transform_aggregations, merged_transforms
 from dpplgngr.etl.convert_to_parquet import convert
 import dask.dataframe as dd
+from dateutil import parser
 from dask_ml.impute import SimpleImputer
 from dask_ml.preprocessing import StandardScaler
 from joblib import load, dump
@@ -10,6 +11,7 @@ import numpy as np
 import logging
 import json
 import os
+import ast
 
 # Try to import snowpark
 try:
@@ -40,6 +42,11 @@ except ImportError:
     luigi = MockLuigi()
     _using_luigi_replacement = True
 
+# Configure logging to show INFO level messages
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger('luigi-interface')
 
 # meta data
@@ -150,8 +157,8 @@ class PreProcess(luigi.Task):
         if not outdir:
             name = input_json.get('name', None)
             outdir = f"data/{name}/preprocessing"
-        print(f"Output directory: {outdir}")
-        print(f"Output path: {self.lu_output_path}")
+        logging.info(f"Output directory: {outdir}")
+        logging.info(f"Output path: {self.lu_output_path}")
         return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
     
     def load_snowflake_data(self, session, schema, table_name, columns):
@@ -229,11 +236,11 @@ class PreProcess(luigi.Task):
         # Find intersection of cols and aggs keys
         cols_for_aggregations = list(set(l_cols).intersection(aggs.keys()))
 
-        print("Aggregation columns: ", cols_for_aggregations)
+        logging.info("Aggregation columns: ", cols_for_aggregations)
         # Apply aggregations
         if cols_for_aggregations:
             s_df = transform_aggregations(s_df, aggs, cols_for_aggregations)
-        return s_df
+        return s_df33
     
     def safe_merge(self, _df, _df_pp):
         # remove any of ["Patientcontactid", "PatientContactId"] from _df if it exists
@@ -242,7 +249,7 @@ class PreProcess(luigi.Task):
         if "PatientContactId" in _df.columns:
             _df = _df.drop(columns=["PatientContactId"])
 
-        print("df_pp premerge")
+        logging.info("df_pp premerge")
         if _df_pp is not None:
             logging.info(f"Shape before merge: {dask_shape(_df_pp)}")
         logging.info(f"New data shape: {dask_shape(_df)}")
@@ -253,7 +260,7 @@ class PreProcess(luigi.Task):
         _df_pp_20 = _df.head(20)
         logging.info("df_pp postmerge")
         logging.info(_df_pp_20)
-        print(f"Shape after merge: {dask_shape(_df_pp)}")
+        logging.info(f"Shape after merge: {dask_shape(_df_pp)}")
         return _df_pp
 
     def run(self):
@@ -286,12 +293,12 @@ class PreProcess(luigi.Task):
                 
                 # Check if we have this data checkpointed
                 if os.path.exists(saved_loc):
-                    print(f"*** Loading {saved_loc} ***")
+                    logging.info(f"*** Loading {saved_loc} ***")
                     df = dd.read_parquet(saved_loc, npartitions=3)
                     df_pp = self.safe_merge(df, df_pp)
                     continue
 
-                print(f"*** Processing Snowflake table {table_name} ***")
+                logging.info(f"*** Processing Snowflake table {table_name} ***")
                 
                 # Load data from Snowflake
                 df = self.load_snowflake_data(session, input_schema, table_name, cols)
@@ -337,18 +344,18 @@ class PreProcess(luigi.Task):
                 saved_loc = f"{input_json['preprocessing']}/{current_name}_preprocessed.parquet"
                 # If file exists then load it
                 if os.path.exists(saved_loc):
-                    print(f"*** Loading {saved_loc} ***")
+                    logging.info(f"*** Loading {saved_loc} ***")
                     df = dd.read_parquet(saved_loc, npartitions=3)
                     df_pp = self.safe_merge(df, df_pp)
                     continue
 
-                print(f"*** Processing {f} ***")
+                logging.info(f"*** Processing {f} ***")
                 vals = data_configs[o.split("/")[-1]]
                 index = vals[0]
                 cols = vals[1:]
 
-                print(f"Index: {index}")
-                print(f"Columns: {cols}")
+                logging.info(f"Index: {index}")
+                logging.info(f"Columns: {cols}")
 
                 if '.parquet' in f:
                     df = dd.read_parquet(f)
@@ -397,8 +404,8 @@ class PreProcess(luigi.Task):
 
         # Reduce to final specified columns
         df_pp = df_pp[input_json["final_cols"]]
-        print(df_pp.head(20))
-        print(f"Final shape: {df_pp.shape}")
+        logging.info(df_pp.head(20))
+        logging.info(f"Final shape: {df_pp.shape}")
         
         # Handle output based on source
         if source == 'SNOWFLAKE' and self.snowpark_session:
@@ -416,7 +423,7 @@ class PreProcess(luigi.Task):
             
             # Write to table (overwrite mode)
             snow_df.write.mode("overwrite").save_as_table(f"{output_schema}.{output_table}")
-            print(f"Preprocessed data written to Snowflake table: {output_schema}.{output_table}")
+            logging.info(f"Preprocessed data written to Snowflake table: {output_schema}.{output_table}")
             
             # Create a dummy local target for Luigi compatibility but don't write actual data
             os.makedirs(os.path.dirname(self.output().path), exist_ok=True)
@@ -426,7 +433,143 @@ class PreProcess(luigi.Task):
             # Save to local parquet file for file-based processing
             df_pp.to_parquet(self.output().path)
         
-        print("Success")
+        logging.info("Success")
+
+
+# Task to take preprocessed data and for columns of the format: [(measurement1, date1), (measurement2, date2) ...]
+# find the first measurement after a configurable date, e. g. OpnameDatum
+class TuplesProcess(luigi.Task):
+    lu_output_path = luigi.Parameter(default='preprocessed_tupleprocess.parquet')
+    etl_config = luigi.Parameter(default="config/etl.json")
+
+    def requires(self):
+        return PreProcess(etl_config=self.etl_config)
+    
+    def output(self):
+        with open(self.etl_config, 'r') as f:
+            input_json = json.load(f)
+        outdir = input_json.get('preprocessing', None)
+        if not outdir:
+            name = input_json.get('name', None)
+            outdir = f"data/{name}/preprocessing"
+        return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
+    
+    def run(self):
+        with open(self.etl_config, 'r') as f:
+            input_json = json.load(f)
+
+        ddf = dd.read_parquet(self.input().path)
+
+        # Get reference date column from config
+        ref_date_col = input_json.get('ref_date', 'OpnameDatum')
+        # Tuple columns to process
+        tuple_cols_after = input_json.get('tuple_vals_after', None)
+        tuple_cols_anybefore = input_json.get('tuple_vals_anybefore', None)
+        if not tuple_cols_anybefore and not tuple_cols_after:
+            logging.info("No tuple columns specified, skipping")
+            ddf.to_parquet(self.output().path)
+            return
+        if not tuple_cols_anybefore:
+            tuple_cols_anybefore = []
+        if not tuple_cols_after:
+            tuple_cols_after = []
+
+        def process_tuple(row, _col_tuple, ref_date_col, after=True):
+            # First find the reference date
+            ref_date = row[ref_date_col]
+            # Then get the tuple column
+            r_col_tuple = row[_col_tuple]
+
+            # Handle <NA>
+            if pd.isnull(r_col_tuple):
+                return np.nan
+            
+            # TODO: Understand why sometimes r_col_tuple is a float with no date
+            # In that case return the float if it's a number
+            if isinstance(r_col_tuple, float):
+                return r_col_tuple
+            
+            # Sort format
+            logger.info(f"_col_tuple (pre-literal eval): {r_col_tuple}")
+            r_col_tuple = ast.literal_eval(r_col_tuple)
+            # Do literal eval on entries in r_col_tuple
+            r_col_tuple = [ast.literal_eval(str(t)) for t in r_col_tuple if "(nan" not in str(t).lower()]
+
+            if len(r_col_tuple) == 0:
+                return np.nan
+
+            measurements, dates = zip(*r_col_tuple)
+            logger.info(f"Measurements: {measurements}, Dates: {dates}, Ref date: {ref_date}")
+            try:
+                # Sort the measurements by date
+                measurements, dates = zip(*r_col_tuple)
+                logger.info(f"Measurements: {measurements}, Dates: {dates}, Ref date: {ref_date}")
+            except ValueError as e:
+                logger.info(f"Error unpacking _col_tuple: {r_col_tuple}")
+                logger.info(f"Error: {e}")
+                return np.nan
+            
+            # Parse dates using dateutil parser for automatic format detection
+            parsed_dates = []
+            for date in dates:
+                try:
+                    parsed_dates.append(parser.parse(str(date)))
+                except (ValueError, TypeError):
+                    parsed_dates.append(pd.NaT)
+            dates = pd.Series(parsed_dates)
+            
+            try:
+                ref_date_parsed = parser.parse(str(ref_date))
+            except (ValueError, TypeError):
+                ref_date_parsed = pd.NaT
+            
+            # Handle case where no valid dates
+            if all(pd.isnull(dates)):
+                return np.nan
+            
+            sorted_indices = np.argsort(dates)
+            measurements = np.array(measurements)[sorted_indices]
+            # If measurements is an array of strings make the values all 1.0
+            if all(isinstance(m, str) for m in measurements):
+                measurements = np.array([1.0 for _ in measurements])
+            dates = np.array(dates)[sorted_indices]
+            # Make dates datetime rather than datetime64
+            dates = [to_datetime(d) for d in dates]
+
+            # If the reference date is NaN/NaT, return first valid measurement
+            if pd.isnull(ref_date_parsed):
+                return measurements[0] if len(measurements) > 0 else np.nan
+            
+            if after:
+                # Find the first measurement after the reference date
+                for meas, date in zip(measurements, dates):
+                    if pd.isnull(date):
+                        continue
+                    try:
+                        if date >= ref_date_parsed:
+                            return meas
+                    except TypeError:
+                        print(f"TypeError comparing dates: {date} and {ref_date_parsed}")
+                        print(f"Types: {type(date)} and {type(ref_date_parsed)}")
+                return np.nan  # If none found, return NaN
+            else:
+                # Find the first measurement before the reference date
+                for meas, date in zip(measurements, dates):
+                    if pd.isnull(date):
+                        continue
+                    if date < ref_date_parsed:
+                        return meas
+            return np.nan  # If none found, return NaN
+
+        for t in tuple_cols_after:
+            ddf[t + '_first_after'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, True), meta=(t + '_first_after', 'float32'))
+        for t in tuple_cols_anybefore:
+            ddf[t + '_any_before'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, False), meta=(t + '_any_before', 'float32'))
+
+
+        ddf.to_parquet(self.output().path)
+        logging.info("Success")
+
 
 
 class ImputeScaleCategorize(luigi.Task):
@@ -522,7 +665,7 @@ class ImputeScaleCategorize(luigi.Task):
             
             # Write to table (overwrite mode)
             snow_df.write.mode("overwrite").save_as_table(f"{output_schema}.{output_table}")
-            print(f"Final processed data written to Snowflake table: {output_schema}.{output_table}")
+            logging.info(f"Final processed data written to Snowflake table: {output_schema}.{output_table}")
             
             # Create a dummy local target for Luigi compatibility but don't write actual data
             os.makedirs(os.path.dirname(self.output().path), exist_ok=True)
@@ -532,7 +675,7 @@ class ImputeScaleCategorize(luigi.Task):
             # Save to local parquet file for file-based processing
             ddf.to_parquet(self.output().path)
         
-        print("Success")
+        logging.info("Success")
         
 
 if __name__ == '__main__':

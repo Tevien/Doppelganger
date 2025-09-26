@@ -4,6 +4,7 @@ import polars as pl
 import pandas as pd
 import numpy as np
 import logging
+from datetime import datetime
 
 logger = logging.getLogger('luigi-interface')
 
@@ -81,3 +82,17 @@ def checkpoint(_df, _filename):
     """
     _df.to_parquet(_filename, engine='pyarrow', compression='snappy')
     return _filename
+
+def to_datetime(date):
+    """
+    Converts a numpy datetime64 object to a python datetime object 
+    Input:
+      date - a np.datetime64 object
+    Output:
+      DATE - a python datetime object
+    """
+    if pd.isnull(date):
+        return np.nan
+    timestamp = ((date - np.datetime64('1970-01-01T00:00:00'))
+                 / np.timedelta64(1, 's'))
+    return datetime.utcfromtimestamp(timestamp)

@@ -20,6 +20,11 @@
     "final_cols": ["Geslacht", "AgeAtOpname", "IsHuidigeRoker", "hdl_cholesterol", "total_cholesterol", "OpnameDatum",
     "BMI", "SystolischeBloeddrukWaarde", "DiastolischeBloeddrukWaarde", "ace", "time", "beta", "creatinine", "t2dm", "acute_mi", "af", "nyha", "lvef", "hf_fam"],
 
+    "tuple_vals_after": ["hdl_cholesterol", "total_cholesterol", "creatinine", "nyha", "lvef", 
+    "SystolischeBloeddrukWaarde", "DiastolischeBloeddrukWaarde"],
+    "tuple_vals_anybefore": ["ace", "beta", "t2dm", "acute_mi", "af"],
+    "ref_date": "OpnameDatum",
+
     "InitTransforms": {
         "ATCKlasseCode_classified": {
             "func": "classify",
