@@ -1,14 +1,7 @@
 import pyarrow.parquet as pq
 import pyarrow as pa
 import pyarrow.csv
-
 import argparse
-parser = argparse.ArgumentParser(description="Convert CSV to Parquet")
-parser.add_argument("--input", "-i", help="Input CSV file")
-parser.add_argument("--output", "-o", help="Output Parquet file")
-args = parser.parse_args()
-input = args.input
-output = args.output
 
 def convert(_input, _output):
     convert_options = pyarrow.csv.ConvertOptions()
@@ -29,4 +22,10 @@ def convert(_input, _output):
     writer.close()
 
 if __name__ == "__main__":
-    convert(input, output)
+    parser = argparse.ArgumentParser(description="Convert CSV to Parquet")
+    parser.add_argument("--input", "-i", help="Input CSV file")
+    parser.add_argument("--output", "-o", help="Output Parquet file")
+    args = parser.parse_args()
+    input_file = args.input
+    output_file = args.output
+    convert(input_file, output_file)

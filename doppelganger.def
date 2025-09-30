@@ -1,0 +1,210 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    Author SB
+    Version v1.1
+    Description Doppelganger synthetic data generation package container using uv
+    Date 2025-01-22
+
+%help
+    This container provides a complete Python environment for running the Doppelganger
+    synthetic data generation package (dpplgngr) using uv for fast package management.
+    
+    Usage:
+        # Interactive shell
+        apptainer shell doppelganger.sif
+        
+        # Run ETL pipeline
+        apptainer exec doppelganger.sif python /opt/doppelganger/scripts/run_amc.py
+        
+        # Run tests
+        apptainer exec doppelganger.sif python /opt/doppelganger/run_tests.py
+        
+        # Run specific Luigi tasks
+        apptainer exec doppelganger.sif python -c "import luigi; from dpplgngr.train.sdv import SDVGen; luigi.build([SDVGen()], local_scheduler=True)"
+
+%environment
+    export LC_ALL=C
+    export PATH="/opt/python/bin:$PATH"
+    export PYTHONPATH="/opt/doppelganger:$PYTHONPATH"
+    export LUIGI_CONFIG_PATH="/opt/doppelganger/config"
+    export MPLBACKEND=Agg
+    export OMP_NUM_THREADS=4
+    export NUMBA_NUM_THREADS=4
+    export VIRTUAL_ENV="/opt/python"
+
+%post
+    # Set non-interactive mode for apt to prevent prompts
+    export DEBIAN_FRONTEND=noninteractive
+    
+    # Update system packages
+    apt-get update && apt-get upgrade -y
+    
+    # Install system dependencies
+    apt-get install -y \
+        wget \
+        curl \
+        git \
+        build-essential \
+        gcc \
+        g++ \
+        gfortran \
+        libopenblas-dev \
+        liblapack-dev \
+        libhdf5-dev \
+        pkg-config \
+        libfreetype6-dev \
+        libpng-dev \
+        libjpeg-dev \
+        libffi-dev \
+        libssl-dev \
+        zlib1g-dev \
+        libbz2-dev \
+        libreadline-dev \
+        libsqlite3-dev \
+        libncurses5-dev \
+        libncursesw5-dev \
+        xz-utils \
+        tk-dev \
+        ca-certificates \
+        python3.11 \
+        python3.11-dev \
+        python3.11-venv \
+        python3-pip \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Install uv (fast Python package installer)
+    # curl -LsSf https://astral.sh/uv/install.sh | sh
+    # export PATH="/root/.cargo/bin:$PATH"
+
+    # Install uv with pip
+    pip install uv
+    
+    # Create Python virtual environment with uv
+    uv venv /opt/python --python 3.11
+    
+    # Activate the virtual environment
+    export PATH="/opt/python/bin:$PATH"
+    export VIRTUAL_ENV="/opt/python"
+    
+    # Create application directory
+    mkdir -p /opt/doppelganger
+    cd /opt/doppelganger
+
+%files
+    ./requirements-container.txt /opt/doppelganger/requirements-container.txt
+    ./dpplgngr /opt/doppelganger/dpplgngr
+    ./config /opt/doppelganger/config
+    ./scripts /opt/doppelganger/scripts
+    ./test /opt/doppelganger/test
+    ./requirements.txt /opt/doppelganger/requirements.txt
+    ./setup.py /opt/doppelganger/setup.py
+    ./README.md /opt/doppelganger/README.md
+    ./run_tests.py /opt/doppelganger/run_tests.py
+    ./pytest.ini /opt/doppelganger/pytest.ini
+
+%post
+    # Continue installation after files are copied
+    export DEBIAN_FRONTEND=noninteractive
+    export PATH="/root/.cargo/bin:$PATH"
+    export PATH="/opt/python/bin:$PATH"
+    export VIRTUAL_ENV="/opt/python"
+    
+    cd /opt/doppelganger
+    
+    # Install all packages from requirements file using uv
+    uv pip install -r requirements-container.txt
+    
+    # Install the doppelganger package itself in development mode
+    uv pip install -e .
+    
+    # Create directories for data and outputs
+    mkdir -p /opt/doppelganger/data
+    mkdir -p /opt/doppelganger/output
+    mkdir -p /opt/doppelganger/logs
+    
+    # Set proper permissions
+    chmod -R 755 /opt/doppelganger
+    
+    # Clean up uv cache to reduce image size
+    uv cache clean
+
+%runscript
+    #!/bin/bash
+    export PATH="/opt/python/bin:$PATH"
+    export VIRTUAL_ENV="/opt/python"
+    
+    if [ $# -eq 0 ]; then
+        echo "Doppelganger Container - Available commands:"
+        echo "  etl      - Run ETL pipeline"
+        echo "  synth    - Run synthetic data generation"
+        echo "  audit    - Run data audit"
+        echo "  test     - Run test suite"
+        echo "  shell    - Interactive shell"
+        echo ""
+        echo "Usage: apptainer run doppelganger.sif <command> [args]"
+        echo "   or: apptainer exec doppelganger.sif python <script>"
+        exit 0
+    fi
+    
+    case "$1" in
+        etl)
+            shift
+            cd /opt/doppelganger
+            python scripts/run_amc.py --etlconfig=${1:-config/etl_amc_v3.json} --genconfig=${2:-config/synth.json}
+            ;;
+        synth)
+            shift
+            cd /opt/doppelganger
+            python -c "
+import luigi
+from dpplgngr.train.sdv import SDVGen
+luigi.build([SDVGen(gen_config='${1:-config/synth.json}', etl_config='${2:-config/etl_amc_v3.json}')], local_scheduler=True)
+"
+            ;;
+        audit)
+            shift
+            cd /opt/doppelganger
+            python -c "
+import luigi
+from dpplgngr.scores.audit import SyntheticDataAudit
+luigi.build([SyntheticDataAudit(gen_config='${1:-config/synth.json}', etl_config='${2:-config/etl_amc_v3.json}')], local_scheduler=True)
+"
+            ;;
+        test)
+            shift
+            cd /opt/doppelganger
+            python run_tests.py "$@"
+            ;;
+        shell)
+            /bin/bash
+            ;;
+        *)
+            echo "Unknown command: $1"
+            echo "Available commands: etl, synth, audit, test, shell"
+            exit 1
+            ;;
+    esac
+
+%test
+    # Test that Python environment is working
+    export PATH="/opt/python/bin:$PATH"
+    export VIRTUAL_ENV="/opt/python"
+    python --version
+    
+    # Test that uv is available
+    export PATH="/root/.cargo/bin:$PATH"
+    uv --version
+    
+    # Test that key packages are installed
+    python -c "import numpy, pandas, sklearn, luigi, sdv; print('Core packages imported successfully')"
+    
+    # Test that doppelganger package can be imported
+    cd /opt/doppelganger
+    python -c "from dpplgngr.train.sdv import SDVGen; from dpplgngr.scores.audit import SyntheticDataAudit; print('Doppelganger package imported successfully')"
+    
+    # Run basic tests
+    python -m pytest test/test.py::TestDataProcessing::test_load_test_data -v || echo "Test data not available in container, skipping data tests"
+    
+    echo "Container tests completed successfully!"

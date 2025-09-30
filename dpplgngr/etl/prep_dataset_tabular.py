@@ -1,4 +1,4 @@
-from dpplgngr.utils.utils_etl import file_size, return_subset, vals_to_cols, to_datetime, analyze_dataframe
+from dpplgngr.utils.utils_etl import file_size, return_subset, vals_to_cols, to_datetime, analyze_dataframe, safe_merge
 from dpplgngr.utils.functions import transform_aggregations, merged_transforms
 from dpplgngr.etl.convert_to_parquet import convert
 import dask.dataframe as dd
@@ -74,11 +74,6 @@ def create_snowflake_session(connection_params):
         raise ImportError("snowflake-snowpark-python is required for Snowflake integration")
     
     return Session.builder.configs(connection_params).create()
-
-def dask_shape(_df):
-    a = _df.shape
-    a[0].compute(),a[1]
-    return a
 
 class ConvertLargeFiles(luigi.Task):
     lu_output_path = luigi.Parameter(default='converted.json')
@@ -236,32 +231,11 @@ class PreProcess(luigi.Task):
         # Find intersection of cols and aggs keys
         cols_for_aggregations = list(set(l_cols).intersection(aggs.keys()))
 
-        logging.info("Aggregation columns: ", cols_for_aggregations)
+        logging.info("Aggregation columns: %s", cols_for_aggregations)
         # Apply aggregations
         if cols_for_aggregations:
             s_df = transform_aggregations(s_df, aggs, cols_for_aggregations)
         return s_df
-    
-    def safe_merge(self, _df, _df_pp):
-        # remove any of ["Patientcontactid", "PatientContactId"] from _df if it exists
-        if "Patientcontactid" in _df.columns:
-            _df = _df.drop(columns=["Patientcontactid"])
-        if "PatientContactId" in _df.columns:
-            _df = _df.drop(columns=["PatientContactId"])
-
-        logging.info("df_pp premerge")
-        if _df_pp is not None:
-            logging.info(f"Shape before merge: {dask_shape(_df_pp)}")
-        logging.info(f"New data shape: {dask_shape(_df)}")
-        if _df_pp is None:
-            _df_pp = _df
-        else:
-            _df_pp = _df_pp.merge(_df, how="left")
-        _df_pp_20 = _df.head(20)
-        logging.info("df_pp postmerge")
-        logging.info(_df_pp_20)
-        logging.info(f"Shape after merge: {dask_shape(_df_pp)}")
-        return _df_pp
 
     def run(self):
         # Load input json
@@ -295,7 +269,7 @@ class PreProcess(luigi.Task):
                 if os.path.exists(saved_loc):
                     logging.info(f"*** Loading {saved_loc} ***")
                     df = dd.read_parquet(saved_loc, npartitions=3)
-                    df_pp = self.safe_merge(df, df_pp)
+                    df_pp = safe_merge(df, df_pp)
                     continue
 
                 logging.info(f"*** Processing Snowflake table {table_name} ***")
@@ -316,7 +290,7 @@ class PreProcess(luigi.Task):
                 
                 # For Snowflake, don't save checkpoints locally
                 # df.to_parquet(saved_loc)  # Skip local checkpoint for Snowflake
-                df_pp = self.safe_merge(df, df_pp)
+                df_pp = safe_merge(df, df_pp)
                 
         else:
             # Original file-based processing
@@ -346,7 +320,7 @@ class PreProcess(luigi.Task):
                 if os.path.exists(saved_loc):
                     logging.info(f"*** Loading {saved_loc} ***")
                     df = dd.read_parquet(saved_loc, npartitions=3)
-                    df_pp = self.safe_merge(df, df_pp)
+                    df_pp = safe_merge(df, df_pp)
                     continue
 
                 logging.info(f"*** Processing {f} ***")
@@ -395,7 +369,7 @@ class PreProcess(luigi.Task):
                 # Checkpoint pre-concat only if not using SNOWFLAKE
                 if input_json.get("SOURCE", "FILE") != "SNOWFLAKE":
                     df.to_parquet(saved_loc)
-                df_pp = self.safe_merge(df, df_pp)
+                df_pp = safe_merge(df, df_pp)
         
         # Merged transforms
         end_transforms = input_json.get('MergedTransforms', None)

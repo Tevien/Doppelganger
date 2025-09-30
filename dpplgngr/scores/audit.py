@@ -32,10 +32,18 @@ class SyntheticDataAudit(luigi.Task):
     
     def output(self):
         """Define output files for the audit task."""
-        with open(self.gen_config, 'r') as f:
-            input_json = json.load(f)
+        try:
+            with open(self.gen_config, 'r') as f:
+                input_json = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to load generation config: {e}")
+            raise
+            
         outdir = input_json.get('working_dir', None)
-        synth_type = input_json.get('synth_type', None)
+        synth_type = input_json.get('synth_type', input_json.get('synthesizer', 'unknown'))
+        
+        if outdir is None:
+            raise KeyError("'working_dir' not found in generation config")
         
         if not os.path.exists(outdir):
             os.makedirs(outdir)
@@ -202,8 +210,14 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
     
     plt.tight_layout()
     if plots_dir:
-        plt.savefig(os.path.join(plots_dir, 'missing_values_comparison.png'), dpi=300, bbox_inches='tight')
-        plt.close()
+        try:
+            # Ensure plots directory exists
+            os.makedirs(plots_dir, exist_ok=True)
+            plt.savefig(os.path.join(plots_dir, 'missing_values_comparison.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+        except Exception as e:
+            logger.warning(f"Failed to save plot to {plots_dir}: {e}")
+            plt.close()
     else:
         plt.show()
     
@@ -241,8 +255,13 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
         
         plt.tight_layout()
         if plots_dir:
-            plt.savefig(os.path.join(plots_dir, 'numeric_distributions.png'), dpi=300, bbox_inches='tight')
-            plt.close()
+            try:
+                os.makedirs(plots_dir, exist_ok=True)
+                plt.savefig(os.path.join(plots_dir, 'numeric_distributions.png'), dpi=300, bbox_inches='tight')
+                plt.close()
+            except Exception as e:
+                logger.warning(f"Failed to save numeric distributions plot: {e}")
+                plt.close()
         else:
             plt.show()
     
@@ -268,8 +287,13 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
             
             plt.tight_layout()
             if plots_dir:
-                plt.savefig(os.path.join(plots_dir, f'categorical_distribution_{col}.png'), dpi=300, bbox_inches='tight')
-                plt.close()
+                try:
+                    os.makedirs(plots_dir, exist_ok=True)
+                    plt.savefig(os.path.join(plots_dir, f'categorical_distribution_{col}.png'), dpi=300, bbox_inches='tight')
+                    plt.close()
+                except Exception as e:
+                    logger.warning(f"Failed to save categorical plot for {col}: {e}")
+                    plt.close()
             else:
                 plt.show()
     
@@ -320,8 +344,13 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
         
         plt.tight_layout()
         if plots_dir:
-            plt.savefig(os.path.join(plots_dir, 'correlation_matrices.png'), dpi=300, bbox_inches='tight')
-            plt.close()
+            try:
+                os.makedirs(plots_dir, exist_ok=True)
+                plt.savefig(os.path.join(plots_dir, 'correlation_matrices.png'), dpi=300, bbox_inches='tight')
+                plt.close()
+            except Exception as e:
+                logger.warning(f"Failed to save correlation matrices plot: {e}")
+                plt.close()
         else:
             plt.show()
         
@@ -332,8 +361,13 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
         plt.title('Correlation Difference (Synthetic - Original)')
         plt.tight_layout()
         if plots_dir:
-            plt.savefig(os.path.join(plots_dir, 'correlation_difference.png'), dpi=300, bbox_inches='tight')
-            plt.close()
+            try:
+                os.makedirs(plots_dir, exist_ok=True)
+                plt.savefig(os.path.join(plots_dir, 'correlation_difference.png'), dpi=300, bbox_inches='tight')
+                plt.close()
+            except Exception as e:
+                logger.warning(f"Failed to save correlation difference plot: {e}")
+                plt.close()
         else:
             plt.show()
 
