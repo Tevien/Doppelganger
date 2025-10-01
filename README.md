@@ -58,6 +58,7 @@ If you have a pre-built container image (`doppelganger.sif`), you can skip the i
 ```bash
 # Assumes doppelganger.sif is available in your working directory
 apptainer shell doppelganger.sif
+source /opt/python/bin/activate
 ```
 
 Configuration
@@ -65,69 +66,62 @@ Configuration
 
 The pipeline requires two main configuration files:
 
-### 1. ETL Configuration (`config/etl_amc_v3.json`)
+### 1. ETL Configuration (`etl.json`)
 
 This file controls data preprocessing and transformation steps:
 
 ```json
 {
-  "data_path": "/path/to/your/data",
-  "output_path": "/path/to/output",
-  "file_configs": {
-    "input_file": "your_data.csv",
-    "output_prefix": "processed_"
-  },
-  "preprocessing": {
-    "missing_value_threshold": 0.5,
-    "categorical_encoding": "onehot",
-    "numeric_scaling": "standard"
-  },
-  "transformations": {
-    "InitTransforms": [
-      {
-        "type": "drop_columns",
-        "columns": ["unwanted_column1", "unwanted_column2"]
-      }
-    ],
-    "PreTransforms": [
-      {
-        "type": "fill_missing",
-        "strategy": "mean",
-        "columns": ["numeric_column1", "numeric_column2"]
-      }
-    ]
-  }
+    "name": "name",
+    "description": "dataset description",
+
+    "absolute_path": "INPUT DATA FOLDER",
+    "preprocessing": "WHERE WILL THE INTERMEDIATE AND OUTPUT FILES BE",
+
+    "filename_type1.parquet": ["pseudo_id", "col1", "col2", "ref_date"],
+    "filename_type2.parquet": ["pseudo_id", "value", {"type_id": {"type1_id": "name1", "type2_id": "name2"}}, ["date_column_name"]],
+  
+
+    "final_cols": ["pseudo_id", "col1", "col2", "name1", "name2", "ref_date"],
+
+    "tuple_vals_after": ["name1", "name2"],
+    "tuple_vals_anybefore": [],
+    "ref_date": "ref_date",
+
+    "InitTransforms": {
+    },
+    "PreTransforms": {
+    },
+    "MergedTransforms": {
+    }
 }
 ```
+Note that 3 types of transformations can be specified:
+- `InitTransforms`: Applied to individual files on load
+- `PreTransforms`: Applied to individual files after initial processing
+- `MergedTransforms`: Applied to the final merged dataframe
+See the functions in the 'dpplgngr.utils.functions' module for available transformations.
 
-### 2. Synthesis Configuration (`config/synth.json`)
+### 2. Synthesis Configuration (`synth.json`)
 
 This file controls synthetic data generation parameters:
 
 ```json
 {
-  "synth_type": "GaussianCopula",
-  "output_path": "/path/to/synthetic/output",
-  "model_params": {
-    "enforce_min_max_values": true,
-    "enforce_rounding": true
-  },
-  "generation": {
-    "num_rows": 10000,
-    "batch_size": 1000
-  },
-  "audit": {
-    "enable_plots": true,
-    "plot_format": "png"
-  }
+    "input_file": "FILE LOCATION",
+    "working_dir": "OUTPUT DIRECTORY",
+    "columns": ["col1", "col2", "name1", "name2"],
+    "num_points": 10000,
+    "synth_type": "GC"
 }
 ```
 
 **Available synthesis types:**
-- `GaussianCopula`: Good for mixed data types
-- `CTGAN`: Deep learning approach for tabular data
-- `CopulaGAN`: Hybrid copula + GAN approach
-- `TVAE`: Variational autoencoder approach
+- `GC`: Gaussian Copula
+- `CTGAN`: Conditional Tabular GAN 
+- `TVAE`: Tabular Variational Autoencoder
+- `RTF`: RealTabFormer - GPT2
+- `GNN`: Graph Neural Network (for relational data) **Coming Soon**
 
 Usage
 -----
@@ -352,38 +346,4 @@ apptainer exec doppelganger.sif python /opt/doppelganger/scripts/run_amc.py
 - `/opt/doppelganger/data/` - Data directory
 - `/opt/doppelganger/output/` - Output directory
 - `/opt/doppelganger/logs/` - Log files
-
-### Benefits of uv
-
-The container uses **uv** instead of conda for Python package management, providing:
-
-- **Faster builds**: uv installs packages 10-100x faster than pip
-- **Smaller images**: No conda overhead, just Python virtual environment
-- **Better dependency resolution**: Modern dependency resolver
-- **Reproducible builds**: Lock file support and consistent environments
-
-### Troubleshooting
-
-**Common Issues:**
-
-1. **Permission errors**: Use `--fakeroot` when building containers or ensure proper file permissions
-2. **Memory issues**: For large datasets, increase container memory limits or use data chunking
-3. **Missing data paths**: Always use absolute paths in configuration files or bind mount directories properly
-
-**Container debugging:**
-```bash
-# Interactive debugging
-apptainer shell doppelganger.sif
-
-# Check Python environment
-apptainer exec doppelganger.sif python -c "import sys; print(sys.path)"
-
-# Verify package installation
-apptainer exec doppelganger.sif python -c "from dpplgngr.train.sdv import SDVGen; print('Package OK')"
-```
-
-**Performance tips:**
-- Use bind mounts for large datasets instead of copying into container
-- Set appropriate `OMP_NUM_THREADS` and `NUMBA_NUM_THREADS` for your system
-- Use fast storage (SSD) for temporary files and outputs
 
