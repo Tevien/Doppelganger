@@ -12,7 +12,7 @@ amc_v1 = {
 
     "Datatools4heart_Patient": {
         "table_name": "TBL_PATIENT",
-        "columns": ["PSEUDO_ID", "GEBORTEJAAR", "GEBORTEMAAND", "GESLACHT", "OVERLIJDENSDATUM"]
+        "columns": ["PSEUDO_ID", "GEBOORTEJAAR", "GEBOORTEMAAND", "GESLACHT", "OVERLIJDENSDATUM"]
     },
     "Datatools4heart_Tabakgebruik": {
         "table_name": "SMOKING_DATA",
@@ -50,7 +50,7 @@ amc_v1 = {
             "func": "diff",
             "kwargs": {
                 "end": "OPNAMEDATUM",
-                "start": "GEBORTEJAAR",
+                "start": "GEBOORTEJAAR",
                 "level": "year"
             }
         },
