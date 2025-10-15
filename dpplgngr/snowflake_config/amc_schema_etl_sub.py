@@ -15,7 +15,7 @@ amc_v1 = {
         "columns": ["PSEUDO_ID", "GEBOORTEJAAR", "GEBOORTEMAAND", "GESLACHT", "OVERLIJDENSDATUM"]
     },
     "Datatools4heart_Tabakgebruik": {
-        "table_name": "SMOKING_DATA",
+        "table_name": "TBL_TABAKGEBRUIK",
         "columns": ["PSEUDO_ID", "ISHUIDIGEROKER", "ISVOORMALIGEROKER", "PATIENTCONTACTID"]
     },
 
