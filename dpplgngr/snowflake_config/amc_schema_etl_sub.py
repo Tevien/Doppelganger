@@ -16,7 +16,7 @@ amc_v1 = {
     },
     "Datatools4heart_Tabakgebruik": {
         "table_name": "TBL_TABAKGEBRUIK",
-        "columns": ["PSEUDO_ID", "ISHUIDIGEROKER", "ISVOORMALIGEROKER", "PATIENTCONTACTID"]
+        "columns": ["PSEUDO_ID", "ISHUIDIGEROKER", "ISVOORMALIGROKER", "PATIENTCONTACTID"]
     },
 
     "categories": {"GESLACHT": ["Man", "Vrouw"]},
