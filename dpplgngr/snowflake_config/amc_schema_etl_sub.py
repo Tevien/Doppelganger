@@ -18,12 +18,14 @@ amc_v1 = {
         "table_name": "TBL_TABAKGEBRUIK",
         "columns": ["PSEUDO_ID", "ISHUIDIGEROKER", "ISVOORMALIGROKER", "PATIENTCONTACTID"]
     },
+    "Datatools4heart_Opnametraject": {
+        "table_name": "TBL_OPNAMETRAJECT", 
+        "columns": ["PSEUDO_ID", "OPNAMEDATUM"]
+    },
 
     "categories": {"GESLACHT": ["Man", "Vrouw"]},
-    "scaler": "scaler_amc.h5",
-    "imputer": "imputer_amc.h5",
 
-    "final_cols": ["GESLACHT", "AGEATOPNAME", "ISHUIDIGEROKER"],
+    "final_cols": ["GESLACHT", "AGEATOPNAME", "ISHUIDIGEROKER", "OPNAMEDATUM"],
 
     "InitTransforms": {
     },
@@ -46,7 +48,7 @@ amc_v1 = {
     },
 
     "MergedTransforms": {
-        "AgeAtOpname": {
+        "AGEATOPNAME": {
             "func": "diff",
             "kwargs": {
                 "end": "OPNAMEDATUM",
@@ -54,13 +56,13 @@ amc_v1 = {
                 "level": "year"
             }
         },
-        "Geslacht": {
+        "GESLACHT": {
             "func": "map",
             "kwargs": {
                 "map": {"Man": 0, "Vrouw": 1}
             }
         },
-        "IsHuidigeRoker": {
+        "ISHUIDIGEROKER": {
             "func": "map",
             "kwargs": {
                 "map": {"Nee": 0, "Ja": 1}

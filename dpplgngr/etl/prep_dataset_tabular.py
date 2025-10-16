@@ -171,7 +171,14 @@ class PreProcess(luigi.Task):
         if isinstance(columns, list) and len(columns) > 0:
             # Handle simple column selection
             if all(isinstance(c, str) for c in columns):
-                df_snow = df_snow.select([col(c) for c in columns])
+                # Get existing columns in the table
+                existing_columns = [field.name for field in df_snow.schema.fields]
+                # Filter to only include columns that exist
+                available_columns = [c for c in columns if c in existing_columns]
+                if available_columns:
+                    df_snow = df_snow.select([col(c) for c in available_columns])
+                else:
+                    logger.warning(f"None of the specified columns {columns} exist in table {table_ref}")
         
         # Convert to pandas DataFrame for compatibility with existing processing
         df_pandas = df_snow.to_pandas()
@@ -260,7 +267,7 @@ class PreProcess(luigi.Task):
             # Process each Snowflake table
             for table_key, table_config in data_configs.items():
                 table_name = table_config['table_name']
-                cols = table_config['columns']
+                vals = table_config['columns']
                 
                 current_name = table_key.replace('Datatools4heart_', '')
                 saved_loc = f"{input_json['preprocessing']}/{current_name}_preprocessed.parquet"
@@ -275,17 +282,44 @@ class PreProcess(luigi.Task):
                 logging.info(f"*** Processing Snowflake table {table_name} ***")
                 
                 # Load data from Snowflake
-                df = self.load_snowflake_data(session, input_schema, table_name, cols)
+                df = self.load_snowflake_data(session, input_schema, table_name, vals)
                 
                 # Set index if specified
-                index = None
-                if isinstance(cols, list) and len(cols) > 0:
-                    index = cols[0]  # First column as index
-                    if index in df.columns:
-                        df = df.set_index(index)
+                # index = None
+                # if isinstance(vals, list) and len(vals) > 0:
+                #     index = cols[0]  # First column as index
+                #     if index in df.columns:
+                #         df = df.set_index(index)
+
+                index = vals[0]
+                cols = vals[1:]
 
                 # Apply transformations
                 df = self.apply_transformations(df, input_json, cols, transform_type="InitTransforms")
+
+                # are any items in the list dictionaries?
+                col_extract = not any([isinstance(v, dict) for v in vals])
+                logger.info(f"*** Column extraction: {col_extract} ***")
+                if col_extract:
+                    df = return_subset(df, cols, index_col=index)
+                else:
+                    """ Assume form of cols is:
+                    ["col_name", {"val_name": {"type1": name1, "type2": name2}}, ["optional_extra_col"]]
+                    """
+                    
+                    col_name = cols[0]
+                    val_name = list(cols[1].keys())[0]
+                    col_map = cols[1][val_name]
+                    extra_cols = None
+                    if len(cols) == 3:
+                        extra_cols = cols[2]
+                    if len(cols) > 3:
+                        raise ValueError("Too many columns specified")
+                    df = vals_to_cols(df, index_col=index, code_col=col_name, value_col=val_name,
+                    code_map=col_map, extra_cols=extra_cols)
+                
+                assert df.index.unique, "Index is not unique"
+                
                 df = self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
                 
                 # For Snowflake, don't save checkpoints locally
@@ -380,7 +414,7 @@ class PreProcess(luigi.Task):
         df_pp = df_pp[input_json["final_cols"]]
         logging.info(df_pp.head(20))
         logging.info(f"Final shape: {df_pp.shape}")
-        
+
         # Handle output based on source
         if source == 'SNOWFLAKE' and self.snowpark_session:
             # Write directly to Snowflake without local backup
@@ -390,6 +424,9 @@ class PreProcess(luigi.Task):
             
             # Convert to pandas for Snowflake write
             df_pandas = df_pp.compute()
+
+            # Reset index to ensure it's a column
+            df_pp = df_pp.reset_index(drop=False)
             
             # Write to Snowflake
             session = self.snowpark_session
@@ -400,9 +437,9 @@ class PreProcess(luigi.Task):
             logging.info(f"Preprocessed data written to Snowflake table: {output_schema}.{output_table}")
             
             # Create a dummy local target for Luigi compatibility but don't write actual data
-            os.makedirs(os.path.dirname(self.output().path), exist_ok=True)
-            with open(self.output().path, 'w') as f:
-                f.write(f"Data written to Snowflake: {output_schema}.{output_table}")
+            #with open(self.output().path, 'w') as f:
+            #os.makedirs(os.path.dirname(self.output().path), exist_ok=True)
+            #    f.write(f"Data written to Snowflake: {output_schema}.{output_table}")
         else:
             # Save to local parquet file for file-based processing
             df_pp.to_parquet(self.output().path)
