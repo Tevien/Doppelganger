@@ -53,10 +53,13 @@ amc_v1_full = {
                    "BMI", "SYSTOLISCHEBLOEDDRUKWAARDE", "DIASTOLISCHEBLOEDDRUKWAARDE", "ACE", "TIME", "BETA", "CREATININE", 
                    "T2DM", "ACUTE_MI", "AF", "HF_FAM"],
 
-    "tuple_vals_after": ["HDL_CHOLESTEROL", "TOTAL_CHOLESTEROL", "CREATININE", "NYHA", "LVEF", 
+    "tuple_vals_after": ["HDL_CHOLESTEROL", "TOTAL_CHOLESTEROL", "CREATININE", 
                         "SYSTOLISCHEBLOEDDRUKWAARDE", "DIASTOLISCHEBLOEDDRUKWAARDE"],
     "tuple_vals_anybefore": ["ACE", "BETA", "T2DM", "ACUTE_MI", "AF"],
     "ref_date": "OPNAMEDATUM",
+
+    "scaler": "scaler.joblib",
+    "imputer": "imputer.joblib",
 
     "InitTransforms": {
         "ATCCODE_CLASSIFIED": {
@@ -160,12 +163,6 @@ amc_v1_full = {
             "func": "fillna",
             "kwargs": {
                 "values": {"ISHUIDIGEROKER": 0}
-            }
-        },
-        "DropNaN": {
-            "func": "dropna",
-            "kwargs": {
-                "subset": ["BMI", "SYSTOLISCHEBLOEDDRUKWAARDE"]
             }
         }
     }

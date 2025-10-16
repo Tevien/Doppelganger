@@ -156,6 +156,67 @@ class PreProcess(luigi.Task):
         logging.info(f"Output path: {self.lu_output_path}")
         return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
     
+    def check_snowflake_table_exists(self, session, schema, table_name):
+        """Check if a table exists in Snowflake schema"""
+        try:
+            # Try to describe the table - if it doesn't exist, this will raise an exception
+            session.table(f"{schema}.{table_name}").schema
+            return True
+        except Exception:
+            return False
+    
+    def load_individual_preprocessed_table(self, session, schema, table_name):
+        """Load an individual preprocessed table from Snowflake"""
+        if not _snowpark_available:
+            raise ImportError("snowflake-snowpark-python is required for Snowflake integration")
+        
+        # Build the table reference
+        table_ref = f"{schema}.{table_name}"
+        
+        # Load the table
+        df_snow = session.table(table_ref)
+        
+        # Convert to pandas DataFrame for compatibility with existing processing
+        df_pandas = df_snow.to_pandas()
+        
+        # The index was reset when saved, so we need to identify the pseudo_id column
+        # It could be named 'index' (if original index was unnamed) or have the original name
+        logging.info(f"Loaded table columns: {df_pandas.columns.tolist()}")
+        
+        # Convert to Dask DataFrame
+        df_dask = dd.from_pandas(df_pandas, npartitions=3)
+        
+        return df_dask
+
+    def write_individual_preprocessed_table(self, session, df, schema, table_name):
+        """Write an individual preprocessed table to Snowflake"""
+        if not _snowpark_available:
+            raise ImportError("snowflake-snowpark-python is required for Snowflake integration")
+        
+        # Convert to pandas for Snowflake write
+        df_pandas = df.compute()
+        
+        # Reset index to ensure it's a column, but preserve the index name for later retrieval
+        index_name = df_pandas.index.name
+        df_pandas = df_pandas.reset_index(drop=False)
+        
+        # If the index was unnamed but we know it should be the first column, 
+        # rename it to ensure we can identify it later
+        if index_name is None and len(df_pandas.columns) > 0:
+            # The reset_index will create a column named 'index' if the index was unnamed
+            if 'index' in df_pandas.columns:
+                # This is likely our pseudo_id column
+                pass  # Keep it as 'index' - we'll handle this in load
+        
+        # Write to Snowflake
+        snow_df = session.create_dataframe(df_pandas)
+        
+        # Write to table (overwrite mode)
+        snow_df.write.mode("overwrite").save_as_table(f"{schema}.{table_name}")
+        logging.info(f"Individual preprocessed table written to Snowflake: {schema}.{table_name}")
+        logging.info(f"Table columns: {df_pandas.columns.tolist()}")
+        logging.info(f"Original index name: {index_name}")
+    
     def load_snowflake_data(self, session, schema, table_name, columns):
         """Load data from Snowflake table"""
         if not _snowpark_available:
@@ -261,6 +322,7 @@ class PreProcess(luigi.Task):
             
             session = self.snowpark_session
             input_schema = snowflake_config.get('input_schema', 'RAW_DATA')
+            output_schema = snowflake_config.get('output_schema', 'PROCESSED_DATA')
             
             logging.info(f"Processing Snowflake tables from schema: {input_schema}")
             
@@ -270,13 +332,31 @@ class PreProcess(luigi.Task):
                 vals = table_config['columns']
                 
                 current_name = table_key.replace('Datatools4heart_', '')
-                saved_loc = f"{input_json['preprocessing']}/{current_name}_preprocessed.parquet"
+                individual_table_name = f"{current_name}_preprocessed"
                 
-                # Check if we have this data checkpointed
-                if os.path.exists(saved_loc):
-                    logging.info(f"*** Loading {saved_loc} ***")
-                    df = dd.read_parquet(saved_loc, npartitions=3)
+                # Check if we have this data already preprocessed in Snowflake
+                if self.check_snowflake_table_exists(session, output_schema, individual_table_name):
+                    logging.info(f"*** Loading existing preprocessed table: {output_schema}.{individual_table_name} ***")
+                    df = self.load_individual_preprocessed_table(session, output_schema, individual_table_name)
+                    
+                    # Ensure the pseudo_id (index) is properly set for consistent merging
+                    index = vals[0]  # First entry is always the pseudo_id
+                    if index in df.columns and df.index.name != index:
+                        df = df.set_index(index)
+                    elif df.index.name is None and index in df.columns:
+                        df = df.set_index(index)
+                    
+                    # Log merge information for debugging
+                    logging.info(f"Before merge (existing table) - df index name: {df.index.name}, df_pp index name: {df_pp.index.name if df_pp is not None else 'None'}")
+                    logging.info(f"df shape: {df.shape}, df_pp shape: {df_pp.shape if df_pp is not None else 'None'}")
+                    
+                    if len(df) == 0:
+                        raise ValueError(f"Loaded preprocessed table {output_schema}.{individual_table_name} is empty")
+                    
                     df_pp = safe_merge(df, df_pp)
+
+                    if len(df_pp) == 0:
+                        raise ValueError("Merging Snowflake tables resulted in empty dataframe - likely index mismatch")
                     continue
 
                 logging.info(f"*** Processing Snowflake table {table_name} ***")
@@ -318,13 +398,33 @@ class PreProcess(luigi.Task):
                     df = vals_to_cols(df, index_col=index, code_col=col_name, value_col=val_name,
                     code_map=col_map, extra_cols=extra_cols)
                 
+                # Ensure the pseudo_id (index) is properly set for consistent merging
+                if index in df.columns and df.index.name != index:
+                    df = df.set_index(index)
+                elif df.index.name is None and index in df.columns:
+                    df = df.set_index(index)
+                
                 assert df.index.unique, "Index is not unique"
                 
                 df = self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
                 
-                # For Snowflake, don't save checkpoints locally
-                # df.to_parquet(saved_loc)  # Skip local checkpoint for Snowflake
+                # Write individual preprocessed table to Snowflake for future use
+                self.write_individual_preprocessed_table(session, df, output_schema, individual_table_name)
+                
+                # Log merge information for debugging
+                logging.info(f"Before merge - df index name: {df.index.name}, df_pp index name: {df_pp.index.name if df_pp is not None else 'None'}")
+                logging.info(f"df shape: {df.shape}, df_pp shape: {df_pp.shape if df_pp is not None else 'None'}")
+                
                 df_pp = safe_merge(df, df_pp)
+                # Throw error if merge fails
+                if len(df_pp) == 0:
+                    raise ValueError("Merging Snowflake tables resulted in empty dataframe - likely index mismatch")
+            
+            # Debug: Check final merged result for Snowflake processing
+            logging.info(f"After processing all Snowflake tables:")
+            logging.info(f"df_pp shape: {df_pp.shape if df_pp is not None else 'None'}")
+            logging.info(f"df_pp index name: {df_pp.index.name if df_pp is not None else 'None'}")
+            logging.info(f"df_pp columns: {df_pp.columns.tolist() if df_pp is not None else 'None'}")
                 
         else:
             # Original file-based processing
@@ -404,11 +504,34 @@ class PreProcess(luigi.Task):
                 if input_json.get("SOURCE", "FILE") != "SNOWFLAKE":
                     df.to_parquet(saved_loc)
                 df_pp = safe_merge(df, df_pp)
+
+                if len(df_pp) == 0:
+                    raise ValueError("Merging files resulted in empty dataframe - likely index mismatch")
         
         # Merged transforms
+        if len(df_pp) == 0:
+            raise ValueError("Unexpected empty dataframe before merged transforms")
         end_transforms = input_json.get('MergedTransforms', None)
         if end_transforms:
             df_pp = merged_transforms(df_pp, end_transforms)
+        if len(df_pp) == 0:
+            raise ValueError("Merged transforms resulted in empty dataframe")
+
+        # Debug: Check dataframe state before final column selection
+        logging.info(f"Before final column selection:")
+        logging.info(f"df_pp shape: {df_pp.shape if df_pp is not None else 'None'}")
+        logging.info(f"df_pp index name: {df_pp.index.name if df_pp is not None else 'None'}")
+        logging.info(f"Available columns: {df_pp.columns.tolist() if df_pp is not None else 'None'}")
+        logging.info(f"Requested final_cols: {input_json['final_cols']}")
+        
+        if df_pp is not None:
+            missing_cols = [col for col in input_json['final_cols'] if col not in df_pp.columns]
+            if missing_cols:
+                logging.warning(f"Missing columns in final selection: {missing_cols}")
+                # Try to include the index in columns if it's one of the missing columns
+                if df_pp.index.name in missing_cols:
+                    df_pp = df_pp.reset_index()
+                    logging.info(f"Reset index, new columns: {df_pp.columns.tolist()}")
 
         # Reduce to final specified columns
         df_pp = df_pp[input_json["final_cols"]]
@@ -426,7 +549,7 @@ class PreProcess(luigi.Task):
             df_pandas = df_pp.compute()
 
             # Reset index to ensure it's a column
-            df_pp = df_pp.reset_index(drop=False)
+            df_pandas = df_pandas.reset_index(drop=False)
             
             # Write to Snowflake
             session = self.snowpark_session
@@ -452,9 +575,18 @@ class PreProcess(luigi.Task):
 class TuplesProcess(luigi.Task):
     lu_output_path = luigi.Parameter(default='preprocessed_tupleprocess.parquet')
     etl_config = luigi.Parameter(default="config/etl.json")
+    snowpark_session = luigi.Parameter(default=None)
 
     def requires(self):
-        return PreProcess(etl_config=self.etl_config)
+        # Only require PreProcess if not using Snowflake independently
+        with open(self.etl_config, 'r') as f:
+            input_json = json.load(f)
+        source = input_json.get('SOURCE', 'FILE')
+        
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            return []  # Run independently for Snowflake
+        else:
+            return PreProcess(etl_config=self.etl_config)
     
     def output(self):
         with open(self.etl_config, 'r') as f:
@@ -465,11 +597,41 @@ class TuplesProcess(luigi.Task):
             outdir = f"data/{name}/preprocessing"
         return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
     
+    def load_snowflake_preprocessed_data(self, session, input_json):
+        """Load preprocessed data from Snowflake table"""
+        if not _snowpark_available:
+            raise ImportError("snowflake-snowpark-python is required for Snowflake integration")
+        
+        snowflake_config = input_json.get('snowflake_config', {})
+        output_schema = snowflake_config.get('output_schema', 'PROCESSED_DATA')
+        input_table = f"{input_json['name']}_preprocessed"
+        
+        # Build the table reference
+        table_ref = f"{output_schema}.{input_table}"
+        
+        # Load the table
+        df_snow = session.table(table_ref)
+        
+        # Convert to pandas DataFrame for compatibility with existing processing
+        df_pandas = df_snow.to_pandas()
+        
+        # Convert to Dask DataFrame
+        df_dask = dd.from_pandas(df_pandas, npartitions=3)
+        
+        return df_dask
+    
     def run(self):
         with open(self.etl_config, 'r') as f:
             input_json = json.load(f)
 
-        ddf = dd.read_parquet(self.input().path)
+        source = input_json.get('SOURCE', 'FILE')
+        
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            # Load data from Snowflake
+            ddf = self.load_snowflake_preprocessed_data(self.snowpark_session, input_json)
+        else:
+            # Load from local parquet file
+            ddf = dd.read_parquet(self.input().path)
 
         # Get reference date column from config
         ref_date_col = input_json.get('ref_date', 'OpnameDatum')
@@ -478,7 +640,29 @@ class TuplesProcess(luigi.Task):
         tuple_cols_anybefore = input_json.get('tuple_vals_anybefore', None)
         if not tuple_cols_anybefore and not tuple_cols_after:
             logging.info("No tuple columns specified, skipping")
-            ddf.to_parquet(self.output().path)
+            if source == 'SNOWFLAKE' and self.snowpark_session:
+                # For Snowflake, just copy the input table to output table
+                snowflake_config = input_json.get('snowflake_config', {})
+                output_schema = snowflake_config.get('output_schema', 'PROCESSED_DATA')
+                output_table = f"{input_json['name']}_tupleprocessed"
+                
+                # Convert to pandas for Snowflake write
+                df_pandas = ddf.compute()
+                
+                # Write to Snowflake
+                session = self.snowpark_session
+                snow_df = session.create_dataframe(df_pandas)
+                
+                # Write to table (overwrite mode)
+                snow_df.write.mode("overwrite").save_as_table(f"{output_schema}.{output_table}")
+                logging.info(f"Tuple processed data written to Snowflake table: {output_schema}.{output_table}")
+                
+                # Create a dummy local target for Luigi compatibility
+                os.makedirs(os.path.dirname(self.output().path), exist_ok=True)
+                with open(self.output().path, 'w') as f:
+                    f.write(f"Data written to Snowflake: {output_schema}.{output_table}")
+            else:
+                ddf.to_parquet(self.output().path)
             return
         if not tuple_cols_anybefore:
             tuple_cols_anybefore = []
@@ -577,10 +761,31 @@ class TuplesProcess(luigi.Task):
         for t in tuple_cols_anybefore:
             ddf[t + '_any_before'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, False), meta=(t + '_any_before', 'float32'))
 
-        # Make analysis of dataframe
-        analyze_dataframe(ddf, prefix="TUPLEPROCESS")
+        # Make analysis of dataframe (only for non-Snowflake sources)
+        if source != 'SNOWFLAKE':
+            analyze_dataframe(ddf, prefix="TUPLEPROCESS")
 
-        ddf.to_parquet(self.output().path)
+        # Handle output based on source
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            # Write to Snowflake
+            snowflake_config = input_json.get('snowflake_config', {})
+            output_schema = snowflake_config.get('output_schema', 'PROCESSED_DATA')
+            output_table = f"{input_json['name']}_tupleprocessed"
+            
+            # Convert to pandas for Snowflake write
+            df_pandas = ddf.compute()
+            
+            # Write to Snowflake
+            session = self.snowpark_session
+            snow_df = session.create_dataframe(df_pandas)
+            
+            # Write to table (overwrite mode)
+            snow_df.write.mode("overwrite").save_as_table(f"{output_schema}.{output_table}")
+            logging.info(f"Tuple processed data written to Snowflake table: {output_schema}.{output_table}")
+        else:
+            # Save to local parquet file for file-based processing
+            ddf.to_parquet(self.output().path)
+        
         logging.info("Success")
 
 
@@ -591,7 +796,60 @@ class ImputeScaleCategorize(luigi.Task):
     snowpark_session = luigi.Parameter(default=None)
 
     def requires(self):
-        return PreProcess(etl_config=self.etl_config, snowpark_session=self.snowpark_session)
+        with open(self.etl_config, 'r') as f:
+            input_json = json.load(f)
+        
+        # Check if tuple processing is needed
+        tuple_cols_after = input_json.get('tuple_vals_after', None)
+        tuple_cols_anybefore = input_json.get('tuple_vals_anybefore', None)
+        needs_tuple_processing = (tuple_cols_after and len(tuple_cols_after) > 0) or (tuple_cols_anybefore and len(tuple_cols_anybefore) > 0)
+        
+        source = input_json.get('SOURCE', 'FILE')
+        
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            if needs_tuple_processing:
+                return []  # Run independently, will load from TuplesProcess output
+            else:
+                return []  # Run independently, will load from PreProcess output
+        else:
+            if needs_tuple_processing:
+                return TuplesProcess(etl_config=self.etl_config)
+            else:
+                return PreProcess(etl_config=self.etl_config, snowpark_session=self.snowpark_session)
+    
+    def load_snowflake_data(self, session, input_json):
+        """Load data from appropriate Snowflake table based on configuration"""
+        if not _snowpark_available:
+            raise ImportError("snowflake-snowpark-python is required for Snowflake integration")
+        
+        snowflake_config = input_json.get('snowflake_config', {})
+        output_schema = snowflake_config.get('output_schema', 'PROCESSED_DATA')
+        
+        # Check if tuple processing is needed
+        tuple_cols_after = input_json.get('tuple_vals_after', None)
+        tuple_cols_anybefore = input_json.get('tuple_vals_anybefore', None)
+        needs_tuple_processing = (tuple_cols_after and len(tuple_cols_after) > 0) or (tuple_cols_anybefore and len(tuple_cols_anybefore) > 0)
+        
+        if needs_tuple_processing:
+            # Load from tuple processed table
+            input_table = f"{input_json['name']}_tupleprocessed"
+        else:
+            # Load from preprocessed table
+            input_table = f"{input_json['name']}_preprocessed"
+        
+        # Build the table reference
+        table_ref = f"{output_schema}.{input_table}"
+        
+        # Load the table
+        df_snow = session.table(table_ref)
+        
+        # Convert to pandas DataFrame for compatibility with existing processing
+        df_pandas = df_snow.to_pandas()
+        
+        # Convert to Dask DataFrame
+        df_dask = dd.from_pandas(df_pandas, npartitions=3)
+        
+        return df_dask
     
     def output(self):
         with open(self.etl_config, 'r') as f:
@@ -620,7 +878,13 @@ class ImputeScaleCategorize(luigi.Task):
             load_imp = True
             imputer = load(imputer_path)
         
-        ddf = dd.read_parquet(self.input().path)
+        # Load data based on source
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            # Load data from Snowflake
+            ddf = self.load_snowflake_data(self.snowpark_session, input_json)
+        else:
+            # Load from local parquet file
+            ddf = dd.read_parquet(self.input().path)
 
         # Make cells with underscores nan
         to_nan = ["", "__", "_", "___"]
@@ -703,7 +967,12 @@ if __name__ == '__main__':
     # }).create()
     
     # For file-based processing (default)
-    luigi.build([ConvertLargeFiles(), PreProcess(), ImputeScaleCategorize()], workers=2, local_scheduler=True)
+    luigi.build([ConvertLargeFiles(), PreProcess(), TuplesProcess(), ImputeScaleCategorize()], workers=2, local_scheduler=True)
     
     # For Snowflake processing, pass the session:
-    # luigi.build([PreProcess(snowpark_session=session), ImputeScaleCategorize(snowpark_session=session)], workers=2, local_scheduler=True)
+    # luigi.build([PreProcess(snowpark_session=session), TuplesProcess(snowpark_session=session), ImputeScaleCategorize(snowpark_session=session)], workers=2, local_scheduler=True)
+    
+    # For independent Snowflake processing (when steps run in separate worksheets):
+    # Step 1: luigi.build([PreProcess(snowpark_session=session)], workers=1, local_scheduler=True)
+    # Step 2: luigi.build([TuplesProcess(snowpark_session=session)], workers=1, local_scheduler=True)  
+    # Step 3: luigi.build([ImputeScaleCategorize(snowpark_session=session)], workers=1, local_scheduler=True)
