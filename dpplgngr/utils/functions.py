@@ -212,6 +212,47 @@ def dg_map(_df, **kwargs):
     _df[out_col] = _df[out_col].map(map_dict)
     return _df
 
+def bool_to_int(_df, **kwargs):
+    """Convert boolean column to integer (True=1, False=0)."""
+    out_col = kwargs.get('out_col', None)
+    columns = kwargs.get('columns', [out_col])
+    for col in columns:
+        if col in _df.columns:
+            # Map boolean values to integers with explicit meta for Dask
+            _df[col] = _df[col].map({True: 1, False: 0}, meta=(col, 'float64'))
+            # Fill any remaining NaN with 0 or keep as NaN based on config
+            fill_na = kwargs.get('fill_na', False)
+            if fill_na:
+                _df[col] = _df[col].fillna(0)
+    return _df
+
+def to_numeric(_df, **kwargs):
+    """Convert columns to numeric type, handling Decimal and string representations."""
+    out_col = kwargs.get('out_col', None)
+    columns = kwargs.get('columns', [out_col])
+    errors = kwargs.get('errors', 'coerce')  # 'coerce', 'raise', or 'ignore'
+    
+    from decimal import Decimal
+    import numpy as np
+    
+    for col in columns:
+        if col in _df.columns:
+            # Define a conversion function that works with Dask
+            def convert_to_float(x):
+                if isinstance(x, Decimal):
+                    return float(x)
+                elif pd.isna(x) or x is None:
+                    return np.nan
+                else:
+                    try:
+                        return float(x)
+                    except (ValueError, TypeError):
+                        return np.nan if errors == 'coerce' else x
+            
+            # Apply conversion and explicitly convert to float64
+            _df[col] = _df[col].apply(convert_to_float, meta=(col, 'float64'))
+    return _df
+
 def fillna(_df, **kwargs):
     out_col = kwargs.get('out_col', None)
     values = kwargs.get('values', None)
@@ -305,6 +346,8 @@ function_dict = {
     "beta": beta,
     "diff": diff,
     "map": dg_map,
+    "bool_to_int": bool_to_int,
+    "to_numeric": to_numeric,
     "fillna": fillna,
     "dropna": dropna,
     "chain": chain,

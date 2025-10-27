@@ -66,9 +66,23 @@ class SDVGen(luigi.Task):
         # Load data
         df = pd.read_parquet(input_json['input_file'])
 
+        # Convert Decimal columns to float
+        from decimal import Decimal
+        for col in df.columns:
+            if df[col].dtype == 'object' and df[col].apply(lambda x: isinstance(x, Decimal)).any():
+                df[col] = df[col].apply(lambda x: float(x) if isinstance(x, Decimal) else x)
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
         # Make BMI physical
         # TODO: MOVE THIS TO ETL
-        df = df[df["BMI"]<100]
+        # Check for BMI column (could be "BMI" or "vital_signs_BMI_value_pET_first")
+        # bmi_col = None
+        # for col in df.columns:
+        #     if 'BMI' in col or col == 'BMI':
+        #         bmi_col = col
+        #         break
+        # if bmi_col is not None:
+        #     df = df[pd.to_numeric(df[bmi_col], errors='coerce')<100]
         
         df = df[cols]
 

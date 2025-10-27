@@ -73,8 +73,19 @@ class SyntheticDataAudit(luigi.Task):
         # Load original data
         original_data = pd.read_parquet(input_json['input_file'])
         # Apply same preprocessing as in SDVGen
-        original_data = original_data[original_data["BMI"]<100]
+        # Check for BMI column (could be "BMI" or "vital_signs_BMI_value_pET_first")
+        bmi_col = None
+        for col in original_data.columns:
+            if 'BMI' in col or col == 'BMI':
+                bmi_col = col
+                break
+        if bmi_col is not None:
+            original_data = original_data[pd.to_numeric(original_data[bmi_col], errors='coerce')<100]
+        
         original_data = original_data[cols]
+        
+        # Reset index to avoid duplicate index issues in SDV evaluation
+        original_data = original_data.reset_index(drop=True)
         
         # Handle timedelta columns
         for col in original_data.columns:
@@ -84,6 +95,9 @@ class SyntheticDataAudit(luigi.Task):
         # Load synthetic data
         synthetic_data_path = os.path.join(outdir, f"synthdata_{synth_type}_{num_points}.parquet")
         synthetic_data = pd.read_parquet(synthetic_data_path)
+        
+        # Reset index for synthetic data as well
+        synthetic_data = synthetic_data.reset_index(drop=True)
         
         # Load metadata
         metadata_path = self.input().path.replace('.pkl', '_metadata.json')

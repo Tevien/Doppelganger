@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 setup(
     name='dpplgngr',
     packages=find_packages(),
-    version='0.3.0',
+    version='0.3.2',
     description='Deep-learning automated twinning',
     author='Sean Benson',
     license='MIT',
@@ -17,5 +17,5 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python :: 3',
     ],
-    python_requires='>=3.6',
+    python_requires='>=3.9',
 )
