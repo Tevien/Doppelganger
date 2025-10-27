@@ -2,6 +2,7 @@ import dask.dataframe as dd
 import pandas as pd
 import logging
 from dpplgngr.utils.definitions import ace_atc, beta_atc, make_classification_map
+import inspect
 
 logger = logging.getLogger('luigi-interface')
 
@@ -354,6 +355,14 @@ function_dict = {
     "classify": classify,
     "pattern_match": pattern_match,
 }
+# Functions that don't use out_col parameter - derive from function signatures
+no_output_col_funcs = []
+for func_name, func in function_dict.items():
+    sig = inspect.signature(func)
+    # Check if the function uses out_col in its implementation
+    source = inspect.getsource(func)
+    if 'out_col' not in source or 'kwargs.get(\'out_col\'' not in source:
+        no_output_col_funcs.append(func_name)
 
 def function_to_execute(config_parameter):
     if config_parameter not in function_dict:
@@ -371,12 +380,21 @@ def transform_aggregations(_df, aggs, cols_for_aggs):
     return _df
 
 def merged_transforms(_df, _tfs):
+    
     for col in _tfs:
-        func = function_to_execute(_tfs[col]['func'])
-        _kwargs = _tfs[col]['kwargs']
-        # Make col a kwarg
-        _kwargs['out_col'] = col
-        print(_kwargs)
+        func_name = _tfs[col]['func']
+        func = function_to_execute(func_name)
+        _kwargs = _tfs[col]['kwargs'].copy()  # Copy to avoid modifying original
+        
+        # Only add out_col for functions that actually use it
+        if func_name not in no_output_col_funcs:
+            _kwargs['out_col'] = col
+        
         _df = func(_df, **_kwargs)
+        
+        # Check if dataframe became empty
+        if len(_df) == 0:
+            raise ValueError(f"DataFrame became empty after {func_name} transform! Transform config: {_tfs[col]}")
+            
     return _df
 

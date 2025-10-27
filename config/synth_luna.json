@@ -1,0 +1,11 @@
+{
+    "input_file": "/scratch/sbenson/data.parquet",
+    "working_dir": "/scratch/sbenson",
+    "columns": ["GESLACHT", "AGEATOPNAME", "ISHUIDIGEROKER", "BMI",
+    "HDL_CHOLESTEROL_first_after", "TOTAL_CHOLESTEROL_first_after",
+    "ACE_any_before", "TIME", "BETA_blocker_any_before",
+    "CREATININE_first_after", "T2DM_any_before", "ACUTE_MI_any_before", "AF_any_before",
+    "HF_FAM_any_before"],
+    "num_points": 10000,
+    "synth_type": "GC"
+}

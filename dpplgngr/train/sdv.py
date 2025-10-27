@@ -32,6 +32,7 @@ function_dict = {
 class SDVGen(luigi.Task):
     gen_config = luigi.Parameter(default="config/synth.json")
     etl_config = luigi.Parameter(default="config/etl.json")
+    override_etl = luigi.BoolParameter(default=False)
 
     def output(self):
         with open(self.gen_config, 'r') as f:
@@ -44,7 +45,11 @@ class SDVGen(luigi.Task):
         return luigi.LocalTarget(os.path.join(outdir, synth_out))
     
     def requires(self):
-        return TuplesProcess(etl_config=self.etl_config)
+        if self.override_etl:
+            # Skip ETL requirement
+            return []
+        else:
+            return TuplesProcess(etl_config=self.etl_config)
 
     def run(self):
         # Load input json
