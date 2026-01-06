@@ -159,6 +159,7 @@ def _make_serializable(obj):
 
 
 def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missing='conservative'):
+
     """
     Comprehensive privacy evaluation using multiple frameworks.
     
@@ -202,6 +203,7 @@ def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missi
         synthetic_filled = synthetic_data
         results['missing_value_handling'] = {'strategy': 'none', 'message': 'Disabled by user'}
     
+
     # ==========================================
     # 1. SDMetrics Privacy Metrics
     # ==========================================
@@ -231,6 +233,7 @@ def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missi
         # Categorical CAP (privacy risk for categorical columns)
         try:
             categorical_cols = original_filled.select_dtypes(include=['object', 'category']).columns
+
             if len(categorical_cols) > 0:
                 cap_scores = {}
                 for col in categorical_cols:
