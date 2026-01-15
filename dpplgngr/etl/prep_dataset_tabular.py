@@ -3,8 +3,6 @@ from dpplgngr.utils.functions import transform_aggregations, merged_transforms
 from dpplgngr.etl.convert_to_parquet import convert
 import dask.dataframe as dd
 from dateutil import parser
-from dask_ml.impute import SimpleImputer
-from dask_ml.preprocessing import StandardScaler
 from joblib import load, dump
 import pandas as pd
 import numpy as np
@@ -12,6 +10,17 @@ import logging
 import json
 import os
 import ast
+
+# Try to import dask_ml, but fall back to sklearn if there are compatibility issues
+try:
+    from dask_ml.impute import SimpleImputer as DaskSimpleImputer
+    from dask_ml.preprocessing import StandardScaler as DaskStandardScaler
+    _use_dask_ml = True
+except ImportError:
+    from sklearn.impute import SimpleImputer as SklearnSimpleImputer
+    from sklearn.preprocessing import StandardScaler as SklearnStandardScaler
+    _use_dask_ml = False
+    logging.warning("dask_ml not available or incompatible, falling back to sklearn")
 
 # Try to import snowpark
 try:
@@ -315,6 +324,7 @@ class PreProcess(luigi.Task):
         
         # Open empty dask dataframe
         df_pp = None
+        pa_schema = None  # Will hold the PyArrow schema for consistent parquet writing
 
         if source == 'SNOWFLAKE':
             if not self.snowpark_session:
@@ -353,7 +363,7 @@ class PreProcess(luigi.Task):
                     if len(df) == 0:
                         raise ValueError(f"Loaded preprocessed table {output_schema}.{individual_table_name} is empty")
                     
-                    df_pp = safe_merge(df, df_pp)
+                    df_pp, pa_schema = safe_merge(df, df_pp)
 
                     if len(df_pp) == 0:
                         raise ValueError("Merging Snowflake tables resulted in empty dataframe - likely index mismatch")
@@ -415,7 +425,7 @@ class PreProcess(luigi.Task):
                 logging.info(f"Before merge - df index name: {df.index.name}, df_pp index name: {df_pp.index.name if df_pp is not None else 'None'}")
                 logging.info(f"df shape: {df.shape}, df_pp shape: {df_pp.shape if df_pp is not None else 'None'}")
                 
-                df_pp = safe_merge(df, df_pp)
+                df_pp, pa_schema = safe_merge(df, df_pp)
                 # Throw error if merge fails
                 if len(df_pp) == 0:
                     raise ValueError("Merging Snowflake tables resulted in empty dataframe - likely index mismatch")
@@ -454,7 +464,7 @@ class PreProcess(luigi.Task):
                 if os.path.exists(saved_loc):
                     logging.info(f"*** Loading {saved_loc} ***")
                     df = dd.read_parquet(saved_loc, npartitions=3)
-                    df_pp = safe_merge(df, df_pp)
+                    df_pp, pa_schema = safe_merge(df, df_pp)
                     continue
 
                 logging.info(f"*** Processing {f} ***")
@@ -503,7 +513,7 @@ class PreProcess(luigi.Task):
                 # Checkpoint pre-concat only if not using SNOWFLAKE
                 if input_json.get("SOURCE", "FILE") != "SNOWFLAKE":
                     df.to_parquet(saved_loc)
-                df_pp = safe_merge(df, df_pp)
+                df_pp, pa_schema = safe_merge(df, df_pp)
 
                 if len(df_pp) == 0:
                     raise ValueError("Merging files resulted in empty dataframe - likely index mismatch")
@@ -511,6 +521,15 @@ class PreProcess(luigi.Task):
         # Merged transforms
         if len(df_pp) == 0:
             raise ValueError("Unexpected empty dataframe before merged transforms")
+        
+        # Debug: Log columns before merged transforms
+        logging.info("=" * 80)
+        logging.info("BEFORE MERGED TRANSFORMS:")
+        logging.info(f"Available columns in df_pp: {df_pp.columns.tolist()}")
+        logging.info(f"df_pp index name: {df_pp.index.name}")
+        logging.info(f"df_pp shape: {df_pp.shape}")
+        logging.info("=" * 80)
+        
         end_transforms = input_json.get('MergedTransforms', None)
         if end_transforms:
             df_pp = merged_transforms(df_pp, end_transforms)
@@ -565,6 +584,9 @@ class PreProcess(luigi.Task):
             #    f.write(f"Data written to Snowflake: {output_schema}.{output_table}")
         else:
             # Save to local parquet file for file-based processing
+            # Note: Don't use cached pa_schema here because the final dataframe has different
+            # columns after filtering to final_cols (e.g., Geboortejaar is used but not kept)
+            logging.info(f"Writing final parquet file (schema will be inferred from current dataframe)")
             df_pp.to_parquet(self.output().path)
         
         logging.info("Success")
@@ -683,10 +705,18 @@ class TuplesProcess(luigi.Task):
             # In that case return the float if it's a number
             if isinstance(r_col_tuple, float):
                 return r_col_tuple
+            elif isinstance(r_col_tuple, str):
+                r_col_tuple = r_col_tuple.replace("nan", "None")
             
             # Sort format
             logger.info(f"_col_tuple (pre-literal eval): {r_col_tuple}")
-            r_col_tuple = ast.literal_eval(r_col_tuple)
+            try:
+                r_col_tuple = ast.literal_eval(r_col_tuple)
+            except:
+                print(f"Error evaluating _col_tuple: {r_col_tuple}")
+                print(type(r_col_tuple))
+                import sys
+                sys.exit(1)
             # Do literal eval on entries in r_col_tuple
             r_col_tuple = [ast.literal_eval(str(t)) for t in r_col_tuple if "(nan" not in str(t).lower()]
 
@@ -757,9 +787,9 @@ class TuplesProcess(luigi.Task):
             return np.nan  # If none found, return NaN
 
         for t in tuple_cols_after:
-            ddf[t + '_first_after'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, True), meta=(t + '_first_after', 'float32'))
+            ddf[t + '_FIRST_AFTER'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, True), meta=(t + '_FIRST_AFTER', 'float32'))
         for t in tuple_cols_anybefore:
-            ddf[t + '_any_before'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, False), meta=(t + '_any_before', 'float32'))
+            ddf[t + '_ANY_BEFORE'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, False), meta=(t + '_ANY_BEFORE', 'float32'))
 
         # Make analysis of dataframe (only for non-Snowflake sources)
         if source != 'SNOWFLAKE':
@@ -787,7 +817,6 @@ class TuplesProcess(luigi.Task):
             ddf.to_parquet(self.output().path)
         
         logging.info("Success")
-
 
 
 class ImputeScaleCategorize(luigi.Task):
@@ -900,9 +929,23 @@ class ImputeScaleCategorize(luigi.Task):
 
         # Scale numerical columns
         if not load_sc:
-            scaler = StandardScaler()
-            scaler.fit(ddf[num_cols])
-        ddf[num_cols] = scaler.transform(ddf[num_cols])
+            if _use_dask_ml:
+                scaler = DaskStandardScaler()
+                scaler.fit(ddf[num_cols])
+                ddf[num_cols] = scaler.transform(ddf[num_cols])
+            else:
+                # Use sklearn with pandas conversion
+                scaler = SklearnStandardScaler()
+                df_pandas = ddf.compute()
+                df_pandas[num_cols] = scaler.fit_transform(df_pandas[num_cols])
+                ddf = dd.from_pandas(df_pandas, npartitions=3)
+        else:
+            if _use_dask_ml:
+                ddf[num_cols] = scaler.transform(ddf[num_cols])
+            else:
+                df_pandas = ddf.compute()
+                df_pandas[num_cols] = scaler.transform(df_pandas[num_cols])
+                ddf = dd.from_pandas(df_pandas, npartitions=3)
 
         # Map categorical columns to binary if only 2
         for c in categories:
@@ -916,9 +959,27 @@ class ImputeScaleCategorize(luigi.Task):
         
         # Impute missing values
         if not load_imp:
-            imputer = SimpleImputer(strategy='median')
-            imputer.fit(ddf)
-        ddf = imputer.transform(ddf)
+            if _use_dask_ml:
+                imputer = DaskSimpleImputer(strategy='median')
+                imputer.fit(ddf)
+                ddf = imputer.transform(ddf)
+            else:
+                # Use sklearn with pandas conversion
+                imputer = SklearnSimpleImputer(strategy='median')
+                df_pandas = ddf.compute()
+                df_pandas_imputed = imputer.fit_transform(df_pandas)
+                # Convert back to dataframe with proper column names
+                df_pandas = pd.DataFrame(df_pandas_imputed, columns=df_pandas.columns, index=df_pandas.index)
+                ddf = dd.from_pandas(df_pandas, npartitions=3)
+        else:
+            if _use_dask_ml:
+                ddf = imputer.transform(ddf)
+            else:
+                df_pandas = ddf.compute()
+                df_pandas_imputed = imputer.transform(df_pandas)
+                # Convert back to dataframe with proper column names
+                df_pandas = pd.DataFrame(df_pandas_imputed, columns=df_pandas.columns, index=df_pandas.index)
+                ddf = dd.from_pandas(df_pandas, npartitions=3)
 
         # Save scaler/imputer to h5 file
         if not load_sc:
@@ -953,7 +1014,169 @@ class ImputeScaleCategorize(luigi.Task):
             ddf.to_parquet(self.output().path)
         
         logging.info("Success")
+
+
+class FillNaN(luigi.Task):
+    """Fill NaN/null values with default values based on column data type.
+    This is a simpler alternative to ImputeScaleCategorize that doesn't do scaling or imputation."""
+    lu_output_path = luigi.Parameter(default='preprocessed_fillnan.parquet')
+    etl_config = luigi.Parameter(default="config/etl.json")
+    snowpark_session = luigi.Parameter(default=None)
+
+    def requires(self):
+        with open(self.etl_config, 'r') as f:
+            input_json = json.load(f)
         
+        # Check if tuple processing is needed
+        tuple_cols_after = input_json.get('tuple_vals_after', None)
+        tuple_cols_anybefore = input_json.get('tuple_vals_anybefore', None)
+        needs_tuple_processing = (tuple_cols_after and len(tuple_cols_after) > 0) or (tuple_cols_anybefore and len(tuple_cols_anybefore) > 0)
+        
+        source = input_json.get('SOURCE', 'FILE')
+        
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            if needs_tuple_processing:
+                return []  # Run independently, will load from TuplesProcess output
+            else:
+                return []  # Run independently, will load from PreProcess output
+        else:
+            if needs_tuple_processing:
+                return TuplesProcess(etl_config=self.etl_config)
+            else:
+                return PreProcess(etl_config=self.etl_config, snowpark_session=self.snowpark_session)
+    
+    def output(self):
+        with open(self.etl_config, 'r') as f:
+            input_json = json.load(f)
+        outdir = input_json.get('preprocessing', None)
+        if not outdir:
+            name = input_json.get('name', None)
+            outdir = f"data/{name}/preprocessing"
+        return luigi.LocalTarget(os.path.join(outdir, str(self.lu_output_path)))
+    
+    def load_snowflake_data(self, session, input_json):
+        """Load data from appropriate Snowflake table based on configuration"""
+        if not _snowpark_available:
+            raise ImportError("snowflake-snowpark-python is required for Snowflake integration")
+        
+        snowflake_config = input_json.get('snowflake_config', {})
+        output_schema = snowflake_config.get('output_schema', 'PROCESSED_DATA')
+        
+        # Check if tuple processing is needed
+        tuple_cols_after = input_json.get('tuple_vals_after', None)
+        tuple_cols_anybefore = input_json.get('tuple_vals_anybefore', None)
+        needs_tuple_processing = (tuple_cols_after and len(tuple_cols_after) > 0) or (tuple_cols_anybefore and len(tuple_cols_anybefore) > 0)
+        
+        if needs_tuple_processing:
+            # Load from tuple processed table
+            input_table = f"{input_json['name']}_tupleprocessed"
+        else:
+            # Load from preprocessed table
+            input_table = f"{input_json['name']}_preprocessed"
+        
+        # Build the table reference
+        table_ref = f"{output_schema}.{input_table}"
+        
+        # Load the table
+        df_snow = session.table(table_ref)
+        
+        # Convert to pandas DataFrame for compatibility with existing processing
+        df_pandas = df_snow.to_pandas()
+        
+        # Convert to Dask DataFrame
+        df_dask = dd.from_pandas(df_pandas, npartitions=3)
+        
+        return df_dask
+    
+    def run(self):
+        with open(self.etl_config, 'r') as f:
+            input_json = json.load(f)
+        name = input_json['name']
+        source = input_json.get('SOURCE', 'FILE')
+
+        # Load data based on source
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            # Load data from Snowflake
+            ddf = self.load_snowflake_data(self.snowpark_session, input_json)
+        else:
+            # Load from local parquet file
+            ddf = dd.read_parquet(self.input().path)
+
+        logging.info("Starting FillNaN processing...")
+        logging.info(f"Initial shape: {ddf.shape}")
+        
+        # Get a sample to determine column types
+        sample_df = ddf.head(1000)
+        
+        # Process each column with null values
+        for col in ddf.columns:
+            # Check if column has any null values
+            null_count = ddf[col].isnull().sum().compute()
+            
+            if null_count > 0:
+                logging.info(f"Column '{col}' has {null_count} null values")
+                
+                # Determine the data type of non-null values
+                non_null_sample = sample_df[col].dropna()
+                
+                if len(non_null_sample) > 0:
+                    # Determine appropriate fill value based on type
+                    if pd.api.types.is_numeric_dtype(non_null_sample):
+                        # For numeric types, fill with 0
+                        fill_value = 0
+                        logging.info(f"  Filling '{col}' with numeric default: {fill_value}")
+                    elif pd.api.types.is_bool_dtype(non_null_sample):
+                        # For boolean types, fill with False
+                        fill_value = False
+                        logging.info(f"  Filling '{col}' with boolean default: {fill_value}")
+                    elif pd.api.types.is_datetime64_any_dtype(non_null_sample):
+                        # For datetime types, fill with epoch (1970-01-01)
+                        fill_value = pd.Timestamp('1970-01-01')
+                        logging.info(f"  Filling '{col}' with datetime default: {fill_value}")
+                    else:
+                        # For string/object types, fill with empty string
+                        fill_value = ""
+                        logging.info(f"  Filling '{col}' with string default: '{fill_value}'")
+                    
+                    # Apply the fill
+                    ddf[col] = ddf[col].fillna(fill_value)
+                else:
+                    # If all values are null, fill with 0 as a safe default
+                    logging.warning(f"  Column '{col}' is entirely null, filling with 0")
+                    ddf[col] = ddf[col].fillna(0)
+        
+        # Verify no nulls remain
+        remaining_nulls = ddf.isnull().sum().sum().compute()
+        logging.info(f"Remaining null values after FillNaN: {remaining_nulls}")
+        
+        # Handle output based on source
+        if source == 'SNOWFLAKE' and self.snowpark_session:
+            # Write to Snowflake
+            snowflake_config = input_json.get('snowflake_config', {})
+            output_schema = snowflake_config.get('output_schema', 'PROCESSED_DATA')
+            output_table = f"{name}_fillnan"
+            
+            # Convert to pandas for Snowflake write
+            df_pandas = ddf.compute()
+            
+            # Write to Snowflake
+            session = self.snowpark_session
+            snow_df = session.create_dataframe(df_pandas)
+            
+            # Write to table (overwrite mode)
+            snow_df.write.mode("overwrite").save_as_table(f"{output_schema}.{output_table}")
+            logging.info(f"FillNaN data written to Snowflake table: {output_schema}.{output_table}")
+            
+            # Create a dummy local target for Luigi compatibility
+            os.makedirs(os.path.dirname(self.output().path), exist_ok=True)
+            with open(self.output().path, 'w') as f:
+                f.write(f"Data written to Snowflake: {output_schema}.{output_table}")
+        else:
+            # Save to local parquet file for file-based processing
+            ddf.to_parquet(self.output().path)
+        
+        logging.info("FillNaN Success")
+
 
 if __name__ == '__main__':
     # Example usage with Snowflake
@@ -966,13 +1189,20 @@ if __name__ == '__main__':
     #     "database": "your_database"
     # }).create()
     
-    # For file-based processing (default)
+    # For file-based processing (default) - with full imputation/scaling
     luigi.build([ConvertLargeFiles(), PreProcess(), TuplesProcess(), ImputeScaleCategorize()], workers=2, local_scheduler=True)
+    
+    # Alternative: For file-based processing with simple NaN filling (instead of ImputeScaleCategorize)
+    # luigi.build([ConvertLargeFiles(), PreProcess(), TuplesProcess(), FillNaN()], workers=2, local_scheduler=True)
     
     # For Snowflake processing, pass the session:
     # luigi.build([PreProcess(snowpark_session=session), TuplesProcess(snowpark_session=session), ImputeScaleCategorize(snowpark_session=session)], workers=2, local_scheduler=True)
+    
+    # For Snowflake with simple NaN filling (alternative):
+    # luigi.build([PreProcess(snowpark_session=session), TuplesProcess(snowpark_session=session), FillNaN(snowpark_session=session)], workers=2, local_scheduler=True)
     
     # For independent Snowflake processing (when steps run in separate worksheets):
     # Step 1: luigi.build([PreProcess(snowpark_session=session)], workers=1, local_scheduler=True)
     # Step 2: luigi.build([TuplesProcess(snowpark_session=session)], workers=1, local_scheduler=True)  
     # Step 3: luigi.build([ImputeScaleCategorize(snowpark_session=session)], workers=1, local_scheduler=True)
+    # Alternative Step 3: luigi.build([FillNaN(snowpark_session=session)], workers=1, local_scheduler=True)
