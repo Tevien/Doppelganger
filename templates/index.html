@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ETL Configuration Builder</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --secondary: #64748b;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --bg-dark: #1e293b;
+            --bg-light: #f8fafc;
+            --bg-card: #ffffff;
+            --text-primary: #0f172a;
+            --text-secondary: #64748b;
+            --border: #e2e8f0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-light);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--primary) 0%, #1d4ed8 100%);
+            color: white;
+            padding: 30px 0;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        header h1 {
+            font-size: 2em;
+            margin-bottom: 5px;
+        }
+
+        header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .card-header {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: var(--text-primary);
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid var(--border);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: var(--text-primary);
+        }
+
+        input[type="text"],
+        select,
+        textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 14px;
+            font-family: inherit;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus,
+        select:focus,
+        textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-hover);
+        }
+
+        .btn-success {
+            background: var(--success);
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #059669;
+        }
+
+        .btn-danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+
+        .btn-secondary {
+            background: var(--bg-light);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--border);
+        }
+
+        .file-item {
+            background: var(--bg-light);
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 6px;
+            border-left: 4px solid var(--primary);
+        }
+
+        .file-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .file-item-title {
+            font-weight: 600;
+            font-size: 1.1em;
+        }
+
+        .file-item-details {
+            color: var(--text-secondary);
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+
+        .columns-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .column-tag {
+            background: white;
+            border: 1px solid var(--border);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 0.85em;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-content {
+            background: var(--bg-card);
+            margin: 50px auto;
+            padding: 30px;
+            border-radius: 8px;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            font-size: 1.5em;
+            font-weight: bold;
+            margin-bottom: 20px;
+            color: var(--primary);
+        }
+
+        .checkbox-group {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 15px;
+            background: var(--bg-light);
+        }
+
+        .checkbox-item {
+            padding: 8px;
+            margin-bottom: 5px;
+        }
+
+        .checkbox-item label {
+            display: inline;
+            margin-left: 8px;
+            font-weight: normal;
+            cursor: pointer;
+        }
+
+        .checkbox-item input[type="checkbox"] {
+            cursor: pointer;
+        }
+
+        .code-preview {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            border-radius: 6px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            overflow-x: auto;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.3s;
+        }
+
+        .tab.active {
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+        }
+
+        .tab:hover {
+            color: var(--primary);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+
+        .alert-success {
+            background: #d1fae5;
+            color: #065f46;
+            border: 1px solid #6ee7b7;
+        }
+
+        .alert-error {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fca5a5;
+        }
+
+        .mapping-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .mapping-row input {
+            flex: 1;
+        }
+
+        .mapping-row button {
+            flex-shrink: 0;
+            margin: 0;
+        }
+
+        .special-config {
+            background: var(--bg-light);
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 15px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+
+        .empty-state-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+        }
+
+        .path-input-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .path-input-group input {
+            flex: 1;
+        }
+
+        .path-input-group .btn-icon {
+            flex-shrink: 0;
+            padding: 10px 15px;
+            min-width: auto;
+        }
+
+        .file-browser {
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 10px;
+            background: white;
+        }
+
+        .file-browser-item {
+            padding: 10px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-bottom: 5px;
+            transition: background 0.2s;
+        }
+
+        .file-browser-item:hover {
+            background: var(--bg-light);
+        }
+
+        .file-browser-item.selected {
+            background: var(--primary);
+            color: white;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
+            }
+
+            .modal-content {
+                margin: 20px;
+                padding: 20px;
+            }
+
+            button {
+                width: 100%;
+                margin-right: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>⚙️ ETL Configuration Builder</h1>
+            <p>Build and manage your ETL configurations with ease - Export to JSON or Python</p>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Alert Messages -->
+        <div id="alert-container"></div>
+
+        <!-- Basic Configuration -->
+        <div class="card">
+            <div class="card-header">📋 Basic Configuration</div>
+            <div class="form-group">
+                <label for="config-name">Name:</label>
+                <input type="text" id="config-name" value="amc_process">
+            </div>
+            <div class="form-group">
+                <label for="config-description">Description:</label>
+                <input type="text" id="config-description" value="Preprocessing of AMC data">
+            </div>
+            <div class="form-group">
+                <label for="config-path">Data Directory:</label>
+                <div class="path-input-group">
+                    <input type="text" id="config-path" placeholder="/path/to/data">
+                    <button class="btn-secondary btn-icon" onclick="openDirectoryBrowser('config-path')" title="Browse and select directory">📁</button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="config-preprocessing">Preprocessing Output Directory:</label>
+                <div class="path-input-group">
+                    <input type="text" id="config-preprocessing" placeholder="/path/to/preprocessing">
+                    <button class="btn-secondary btn-icon" onclick="openDirectoryBrowser('config-preprocessing')" title="Browse and select directory">📁</button>
+                </div>
+            </div>
+            <button class="btn-primary" onclick="updateBasicConfig()">💾 Save Basic Config</button>
+        </div>
+
+        <!-- File Configuration -->
+        <div class="card">
+            <div class="card-header">📄 File Configuration</div>
+            <button class="btn-primary" onclick="openFileSelector()">➕ Add File Configuration</button>
+        </div>
+
+        <!-- Configured Files -->
+        <div class="card">
+            <div class="card-header">📊 Configured Files</div>
+            <div id="configured-files">
+                <div class="empty-state">
+                    <div class="empty-state-icon">📂</div>
+                    <p>No files configured yet. Click "Add File Configuration" to get started.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Preview and Export -->
+        <div class="card">
+            <div class="card-header">📝 Configuration Preview & Export</div>
+            
+            <div class="tabs">
+                <button class="tab active" onclick="switchTab('json')">JSON Format</button>
+                <button class="tab" onclick="switchTab('python')">Python Format</button>
+            </div>
+
+            <div id="json-tab" class="tab-content active">
+                <button class="btn-primary" onclick="previewJSON()">👁️ Preview JSON</button>
+                <button class="btn-success" onclick="downloadJSON()">💾 Download JSON</button>
+                <div id="json-preview" class="code-preview" style="margin-top: 20px;">
+                    <em>Click "Preview JSON" to see the configuration</em>
+                </div>
+            </div>
+
+            <div id="python-tab" class="tab-content">
+                <button class="btn-primary" onclick="previewPython()">👁️ Preview Python</button>
+                <button class="btn-success" onclick="downloadPython()">💾 Download Python</button>
+                <div id="python-preview" class="code-preview" style="margin-top: 20px;">
+                    <em>Click "Preview Python" to see the configuration</em>
+                </div>
+            </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="card">
+            <div class="card-header">🔧 Actions</div>
+            <button class="btn-secondary" onclick="importConfig()">📂 Import Configuration</button>
+            <button class="btn-danger" onclick="clearAll()">🗑️ Clear All</button>
+        </div>
+    </div>
+
+    <!-- Directory Browser Modal -->
+    <div id="directory-browser-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">📁 Browse and Select Directory</div>
+            <div class="form-group">
+                <label>Current Path:</label>
+                <input type="text" id="dir-browse-path" readonly style="background: #f0f0f0;">
+            </div>
+            <div class="form-group">
+                <label>Navigate (double-click folder to open, click file to select):</label>
+                <div class="file-browser" id="directory-list" style="max-height: 400px;"></div>
+            </div>
+            <div style="margin-top: 20px;">
+                <button class="btn-success" onclick="useSelectedPath()">✓ Use This Path</button>
+                <button class="btn-secondary" onclick="openOSBrowserFromModal()">🗁 Open in OS File Manager</button>
+                <button class="btn-secondary" onclick="closeDirectoryBrowser()">✖ Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- File Browser Modal -->
+    <div id="file-browser-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">📁 Browse Files</div>
+            <div class="form-group">
+                <label>Directory Path:</label>
+                <div class="path-input-group">
+                    <input type="text" id="browse-path" placeholder="/path/to/directory">
+                    <button class="btn-secondary btn-icon" onclick="openOSBrowser('browse-path')" title="Open in file browser">📁</button>
+                    <button class="btn-secondary" onclick="loadFiles()">🔍 Load Files</button>
+                </div>
+            </div>
+            <div class="file-browser" id="file-list"></div>
+            <div style="margin-top: 20px;">
+                <button class="btn-primary" onclick="selectFile()">✓ Select File</button>
+                <button class="btn-secondary" onclick="closeBrowser()">✖ Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Column Selector Modal -->
+    <div id="column-selector-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header" id="column-modal-title">⚙️ Configure File</div>
+            
+            <div class="form-group">
+                <label>Select Columns:</label>
+                <div style="margin-bottom: 10px;">
+                    <button class="btn-secondary" onclick="selectAllColumns()">✓ Select All</button>
+                    <button class="btn-secondary" onclick="deselectAllColumns()">✗ Deselect All</button>
+                </div>
+                <div class="checkbox-group" id="column-list"></div>
+            </div>
+
+            <div class="special-config">
+                <h4 style="margin-bottom: 15px;">⚡ Special Configurations</h4>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="has-mapping">
+                        Has measurement mapping (like Labuitslag)
+                    </label>
+                </div>
+
+                <div id="mapping-config" style="display: none; margin-left: 20px;">
+                    <div class="form-group">
+                        <label>Source Column:</label>
+                        <select id="source-column"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Mapping Column:</label>
+                        <select id="mapping-column"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Value Mappings:</label>
+                        <div id="mapping-rows"></div>
+                        <button class="btn-secondary" onclick="addMappingRow()">➕ Add Mapping</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="has-date">
+                        Has date column to wrap in []
+                    </label>
+                </div>
+
+                <div id="date-config" style="display: none; margin-left: 20px;">
+                    <div class="form-group">
+                        <label>Date Column:</label>
+                        <select id="date-column"></select>
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-top: 20px;">
+                <button class="btn-success" onclick="saveFileConfig()">💾 Save Configuration</button>
+                <button class="btn-secondary" onclick="closeColumnSelector()">✖ Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script>
+        let currentFile = null;
+        let currentColumns = [];
+        let selectedFile = null;
+
+        // Tab switching
+        function switchTab(tab) {
+            $('.tab').removeClass('active');
+            $('.tab-content').removeClass('active');
+            
+            if (tab === 'json') {
+                $('.tab').eq(0).addClass('active');
+                $('#json-tab').addClass('active');
+            } else {
+                $('.tab').eq(1).addClass('active');
+                $('#python-tab').addClass('active');
+            }
+        }
+
+        // Show alert
+        function showAlert(message, type = 'success') {
+            const alertClass = type === 'success' ? 'alert-success' : 'alert-error';
+            const alert = $(`<div class="alert ${alertClass}">${message}</div>`);
+            $('#alert-container').html(alert);
+            setTimeout(() => alert.fadeOut(() => alert.remove()), 5000);
+        }
+
+        // Open OS file browser
+        function openOSBrowser(inputId) {
+            const inputElement = document.getElementById(inputId);
+            const path = inputElement.value || '';
+            
+            $.ajax({
+                url: '/api/open-browser',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ path: path }),
+                success: function(response) {
+                    showAlert('✓ ' + response.message);
+                },
+                error: function(xhr) {
+                    const error = xhr.responseJSON?.error || 'Failed to open file browser';
+                    showAlert('✗ ' + error, 'error');
+                }
+            });
+        }
+
+        // Directory browser state
+        let currentTargetInput = null;
+        let currentBrowsePath = null;
+        let selectedPath = null;
+
+        // Open directory browser modal
+        function openDirectoryBrowser(targetInputId) {
+            currentTargetInput = targetInputId;
+            const inputElement = document.getElementById(targetInputId);
+            const startPath = inputElement.value || '';
+            
+            currentBrowsePath = startPath;
+            selectedPath = startPath;
+            
+            $('#directory-browser-modal').show();
+            loadDirectoryContents(startPath || null);
+        }
+
+        function closeDirectoryBrowser() {
+            $('#directory-browser-modal').hide();
+            currentTargetInput = null;
+            currentBrowsePath = null;
+            selectedPath = null;
+        }
+
+        // Load directory contents
+        function loadDirectoryContents(path) {
+            $.ajax({
+                url: '/api/browse/directories',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({path: path || ''}),
+                success: function(response) {
+                    currentBrowsePath = response.current_path;
+                    selectedPath = response.current_path;
+                    $('#dir-browse-path').val(response.current_path);
+                    
+                    const directoryList = $('#directory-list');
+                    directoryList.empty();
+
+                    if (response.items.length === 0) {
+                        directoryList.html('<p style="padding: 20px; text-align: center;">No accessible directories or files found</p>');
+                        return;
+                    }
+
+                    response.items.forEach(item => {
+                        const itemElement = $(`<div class="file-browser-item" data-path="${item.path}" data-type="${item.type}">${item.name}</div>`);
+                        
+                        // Double-click on directory to navigate into it
+                        if (item.type === 'directory' || item.type === 'parent') {
+                            itemElement.dblclick(function() {
+                                loadDirectoryContents(item.path);
+                            });
+                        }
+                        
+                        // Single click to select
+                        itemElement.click(function() {
+                            $('.file-browser-item').removeClass('selected');
+                            $(this).addClass('selected');
+                            selectedPath = item.path;
+                            
+                            // If it's a file, select its directory for "Use This Path"
+                            if (item.type === 'file') {
+                                selectedPath = response.current_path;
+                            }
+                        });
+                        
+                        directoryList.append(itemElement);
+                    });
+                },
+                error: function() {
+                    showAlert('✗ Failed to load directory contents', 'error');
+                }
+            });
+        }
+
+        // Use the selected path
+        function useSelectedPath() {
+            if (!selectedPath) {
+                showAlert('Please select a path', 'error');
+                return;
+            }
+
+            if (currentTargetInput) {
+                $('#' + currentTargetInput).val(selectedPath);
+                showAlert('✓ Path selected: ' + selectedPath);
+            }
+
+            closeDirectoryBrowser();
+        }
+
+        // Open OS browser from within the directory browser modal
+        function openOSBrowserFromModal() {
+            if (!currentBrowsePath) return;
+            
+            $.ajax({
+                url: '/api/open-browser',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ path: currentBrowsePath }),
+                success: function(response) {
+                    showAlert('✓ ' + response.message);
+                },
+                error: function(xhr) {
+                    const error = xhr.responseJSON?.error || 'Failed to open file browser';
+                    showAlert('✗ ' + error, 'error');
+                }
+            });
+        }
+
+        // Update basic configuration
+        function updateBasicConfig() {
+            const data = {
+                name: $('#config-name').val(),
+                description: $('#config-description').val(),
+                absolute_path: $('#config-path').val(),
+                preprocessing: $('#config-preprocessing').val()
+            };
+
+            $.ajax({
+                url: '/api/config/basic',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(data),
+                success: function() {
+                    showAlert('✓ Basic configuration updated successfully');
+                },
+                error: function() {
+                    showAlert('✗ Failed to update configuration', 'error');
+                }
+            });
+        }
+
+        // Open file selector - shows file browser modal
+        function openFileSelector() {
+            const dataPath = $('#config-path').val();
+            if (!dataPath) {
+                showAlert('Please set the data directory first', 'error');
+                return;
+            }
+
+            // Show the file browser modal and pre-populate with data path
+            $('#file-browser-modal').show();
+            $('#browse-path').val(dataPath);
+            // Optionally auto-load files
+            loadFiles();
+        }
+
+        function closeBrowser() {
+            $('#file-browser-modal').hide();
+        }
+
+        // Load files from directory
+        function loadFiles() {
+            const directory = $('#browse-path').val();
+            if (!directory) {
+                showAlert('Please enter a directory path', 'error');
+                return;
+            }
+
+            $.ajax({
+                url: '/api/files/list',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({directory: directory}),
+                success: function(response) {
+                    const fileList = $('#file-list');
+                    fileList.empty();
+
+                    if (response.files.length === 0) {
+                        fileList.html('<p style="padding: 20px; text-align: center;">No compatible files found</p>');
+                        return;
+                    }
+
+                    response.files.forEach(file => {
+                        const item = $(`<div class="file-browser-item">${file}</div>`);
+                        item.click(function() {
+                            $('.file-browser-item').removeClass('selected');
+                            $(this).addClass('selected');
+                            selectedFile = file;
+                        });
+                        fileList.append(item);
+                    });
+                },
+                error: function() {
+                    showAlert('✗ Failed to load files', 'error');
+                }
+            });
+        }
+
+        function selectFile() {
+            if (!selectedFile) {
+                showAlert('Please select a file', 'error');
+                return;
+            }
+
+            const directory = $('#browse-path').val();
+            const filePath = directory + '/' + selectedFile;
+            
+            openColumnSelector(selectedFile, filePath);
+            closeBrowser();
+        }
+
+        // Open column selector
+        function openColumnSelector(filename, filePath) {
+            currentFile = filename;
+            
+            $.ajax({
+                url: '/api/files/columns',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({file_path: filePath}),
+                success: function(response) {
+                    currentColumns = response.columns;
+                    showColumnSelector(filename, response.columns);
+                },
+                error: function() {
+                    showAlert('✗ Failed to read file columns', 'error');
+                }
+            });
+        }
+
+        function showColumnSelector(filename, columns) {
+            $('#column-modal-title').text(`⚙️ Configure: ${filename}`);
+            
+            const columnList = $('#column-list');
+            columnList.empty();
+
+            columns.forEach(col => {
+                const item = $(`
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="col-${col}" value="${col}">
+                        <label for="col-${col}">${col}</label>
+                    </div>
+                `);
+                columnList.append(item);
+            });
+
+            // Populate dropdowns
+            const sourceCol = $('#source-column');
+            const mappingCol = $('#mapping-column');
+            const dateCol = $('#date-column');
+            
+            sourceCol.empty();
+            mappingCol.empty();
+            dateCol.empty();
+
+            columns.forEach(col => {
+                sourceCol.append(`<option value="${col}">${col}</option>`);
+                mappingCol.append(`<option value="${col}">${col}</option>`);
+                dateCol.append(`<option value="${col}">${col}</option>`);
+            });
+
+            $('#column-selector-modal').show();
+        }
+
+        function closeColumnSelector() {
+            $('#column-selector-modal').hide();
+            currentFile = null;
+            currentColumns = [];
+        }
+
+        function selectAllColumns() {
+            $('#column-list input[type="checkbox"]').prop('checked', true);
+        }
+
+        function deselectAllColumns() {
+            $('#column-list input[type="checkbox"]').prop('checked', false);
+        }
+
+        // Mapping configuration
+        $('#has-mapping').change(function() {
+            if ($(this).is(':checked')) {
+                $('#mapping-config').show();
+                addMappingRow();
+            } else {
+                $('#mapping-config').hide();
+            }
+        });
+
+        $('#has-date').change(function() {
+            if ($(this).is(':checked')) {
+                $('#date-config').show();
+            } else {
+                $('#date-config').hide();
+            }
+        });
+
+        function addMappingRow() {
+            const row = $(`
+                <div class="mapping-row">
+                    <input type="text" placeholder="Source value" class="mapping-source">
+                    <span>→</span>
+                    <input type="text" placeholder="Output column name" class="mapping-target">
+                    <button class="btn-danger" onclick="$(this).parent().remove()">🗑️</button>
+                </div>
+            `);
+            $('#mapping-rows').append(row);
+        }
+
+        // Save file configuration
+        function saveFileConfig() {
+            const selectedColumns = [];
+            $('#column-list input[type="checkbox"]:checked').each(function() {
+                selectedColumns.push($(this).val());
+            });
+
+            if (selectedColumns.length === 0) {
+                showAlert('Please select at least one column', 'error');
+                return;
+            }
+
+            let mapping = null;
+            if ($('#has-mapping').is(':checked')) {
+                const sourceCol = $('#source-column').val();
+                const mappingCol = $('#mapping-column').val();
+                const mappings = {};
+
+                $('#mapping-rows .mapping-row').each(function() {
+                    const source = $(this).find('.mapping-source').val().trim();
+                    const target = $(this).find('.mapping-target').val().trim();
+                    if (source && target) {
+                        mappings[source] = target;
+                    }
+                });
+
+                if (Object.keys(mappings).length > 0) {
+                    mapping = {
+                        source_col: sourceCol,
+                        mapping_col: mappingCol,
+                        mappings: {[mappingCol]: mappings}
+                    };
+                }
+            }
+
+            let dateColumn = null;
+            if ($('#has-date').is(':checked')) {
+                dateColumn = $('#date-column').val();
+            }
+
+            const data = {
+                filename: currentFile,
+                columns: selectedColumns,
+                mapping: mapping,
+                date_column: dateColumn
+            };
+
+            $.ajax({
+                url: '/api/config/file',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(data),
+                success: function() {
+                    showAlert('✓ File configuration saved');
+                    closeColumnSelector();
+                    loadConfiguredFiles();
+                },
+                error: function() {
+                    showAlert('✗ Failed to save file configuration', 'error');
+                }
+            });
+        }
+
+        // Load configured files
+        function loadConfiguredFiles() {
+            $.ajax({
+                url: '/api/config',
+                method: 'GET',
+                success: function(config) {
+                    const container = $('#configured-files');
+                    container.empty();
+
+                    const fileConfigs = config.file_configs;
+                    if (Object.keys(fileConfigs).length === 0) {
+                        container.html(`
+                            <div class="empty-state">
+                                <div class="empty-state-icon">📂</div>
+                                <p>No files configured yet. Click "Add File Configuration" to get started.</p>
+                            </div>
+                        `);
+                        return;
+                    }
+
+                    Object.entries(fileConfigs).forEach(([filename, fileConfig]) => {
+                        const item = $('<div class="file-item"></div>');
+                        
+                        const header = $(`
+                            <div class="file-item-header">
+                                <div class="file-item-title">📄 ${filename}</div>
+                                <button class="btn-danger" onclick="deleteFile('${filename}')">🗑️ Remove</button>
+                            </div>
+                        `);
+                        item.append(header);
+
+                        const details = $(`<div class="file-item-details">${fileConfig.columns.length} columns selected</div>`);
+                        item.append(details);
+
+                        if (fileConfig.mapping) {
+                            const mappingInfo = $(`<div class="file-item-details">✓ Has measurement mapping</div>`);
+                            item.append(mappingInfo);
+                        }
+
+                        if (fileConfig.date_column) {
+                            const dateInfo = $(`<div class="file-item-details">✓ Date column: ${fileConfig.date_column}</div>`);
+                            item.append(dateInfo);
+                        }
+
+                        const columnsList = $('<div class="columns-list"></div>');
+                        fileConfig.columns.slice(0, 10).forEach(col => {
+                            columnsList.append(`<span class="column-tag">${col}</span>`);
+                        });
+                        if (fileConfig.columns.length > 10) {
+                            columnsList.append(`<span class="column-tag">+${fileConfig.columns.length - 10} more...</span>`);
+                        }
+                        item.append(columnsList);
+
+                        container.append(item);
+                    });
+                }
+            });
+        }
+
+        function deleteFile(filename) {
+            if (!confirm(`Delete configuration for ${filename}?`)) {
+                return;
+            }
+
+            $.ajax({
+                url: `/api/config/file/${encodeURIComponent(filename)}`,
+                method: 'DELETE',
+                success: function() {
+                    showAlert('✓ File configuration removed');
+                    loadConfiguredFiles();
+                },
+                error: function() {
+                    showAlert('✗ Failed to remove file configuration', 'error');
+                }
+            });
+        }
+
+        // Preview and download
+        function previewJSON() {
+            $.ajax({
+                url: '/api/export/json',
+                method: 'GET',
+                success: function(config) {
+                    const formatted = JSON.stringify(config, null, 4);
+                    $('#json-preview').html(`<pre>${escapeHtml(formatted)}</pre>`);
+                },
+                error: function() {
+                    showAlert('✗ Failed to generate JSON preview', 'error');
+                }
+            });
+        }
+
+        function downloadJSON() {
+            window.location.href = '/api/download/json';
+        }
+
+        function previewPython() {
+            $.ajax({
+                url: '/api/export/python',
+                method: 'GET',
+                success: function(response) {
+                    $('#python-preview').html(`<pre>${escapeHtml(response.python)}</pre>`);
+                },
+                error: function() {
+                    showAlert('✗ Failed to generate Python preview', 'error');
+                }
+            });
+        }
+
+        function downloadPython() {
+            window.location.href = '/api/download/python';
+        }
+
+        // Import configuration
+        function importConfig() {
+            const json = prompt('Paste your JSON configuration:');
+            if (!json) return;
+
+            try {
+                const config = JSON.parse(json);
+                $.ajax({
+                    url: '/api/import',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({config: config}),
+                    success: function(response) {
+                        $('#config-name').val(response.config.name);
+                        $('#config-description').val(response.config.description);
+                        $('#config-path').val(response.config.absolute_path);
+                        $('#config-preprocessing').val(response.config.preprocessing);
+                        
+                        showAlert('✓ Configuration imported successfully');
+                        loadConfiguredFiles();
+                    },
+                    error: function() {
+                        showAlert('✗ Failed to import configuration', 'error');
+                    }
+                });
+            } catch (e) {
+                showAlert('✗ Invalid JSON format', 'error');
+            }
+        }
+
+        // Clear all
+        function clearAll() {
+            if (!confirm('Clear all configurations? This cannot be undone.')) {
+                return;
+            }
+
+            $.ajax({
+                url: '/api/clear',
+                method: 'POST',
+                success: function(response) {
+                    $('#config-name').val(response.config.name);
+                    $('#config-description').val(response.config.description);
+                    $('#config-path').val('');
+                    $('#config-preprocessing').val('');
+                    $('#json-preview').html('<em>Click "Preview JSON" to see the configuration</em>');
+                    $('#python-preview').html('<em>Click "Preview Python" to see the configuration</em>');
+                    
+                    showAlert('✓ All configurations cleared');
+                    loadConfiguredFiles();
+                },
+                error: function() {
+                    showAlert('✗ Failed to clear configuration', 'error');
+                }
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Load initial data
+        $(document).ready(function() {
+            $.ajax({
+                url: '/api/config',
+                method: 'GET',
+                success: function(config) {
+                    $('#config-name').val(config.name);
+                    $('#config-description').val(config.description);
+                    $('#config-path').val(config.absolute_path);
+                    $('#config-preprocessing').val(config.preprocessing);
+                    loadConfiguredFiles();
+                }
+            });
+        });
+    </script>
+</body>
+</html>
