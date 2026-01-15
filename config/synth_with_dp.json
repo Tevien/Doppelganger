@@ -1,0 +1,22 @@
+{
+  "input_file": "data/preprocessing_v3/processed_data.parquet",
+  "working_dir": "output/synth_dp_example",
+  "synth_type": "GC",
+  "num_points": 1000,
+  "columns": ["age", "gender", "BMI", "systolic_bp", "diastolic_bp"],
+  
+  "_comment_differential_privacy": "Optional: Add differential privacy noise to synthetic data",
+  "differential_privacy": {
+    "_comment_epsilon": "Privacy budget: smaller = more privacy. Options: direct epsilon OR privacy_level",
+    "epsilon": 1.0,
+    
+    "_comment_privacy_level": "Alternative to epsilon: 'strong' (0.1), 'moderate' (1.0), 'weak' (10.0)",
+    "privacy_level": null,
+    
+    "_comment_mechanism": "Noise mechanism: 'laplace' (default), 'gaussian', or 'none'",
+    "mechanism": "laplace",
+    
+    "_comment_clip_to_bounds": "Clip noisy values to original data bounds",
+    "clip_to_bounds": true
+  }
+}

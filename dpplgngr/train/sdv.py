@@ -16,6 +16,8 @@ import os
 from dpplgngr.etl.prep_dataset_tabular import ImputeScaleCategorize, TuplesProcess
 # Import missing value handler
 from dpplgngr.utils.missing_value_handler import MissingValueHandler
+# Import differential privacy utilities
+from dpplgngr.utils.differential_privacy import apply_differential_privacy, get_recommended_epsilon
 
 logger = logging.getLogger('luigi-interface')
 
@@ -283,6 +285,40 @@ class SDVGen(luigi.Task):
                 'synthetic_nans_restored': int(final_nan_count)
             })
         
+        # Apply differential privacy if specified in config
+        differential_privacy_config = input_json.get('differential_privacy', None)
+        privacy_info = {'applied': False}
+        
+        if differential_privacy_config:
+            logger.info("Differential privacy configuration found in config")
+            
+            epsilon = differential_privacy_config.get('epsilon', None)
+            mechanism = differential_privacy_config.get('mechanism', 'laplace')
+            privacy_level = differential_privacy_config.get('privacy_level', None)
+            clip_to_bounds = differential_privacy_config.get('clip_to_bounds', True)
+            
+            # Allow specification via privacy level or direct epsilon
+            if epsilon is None and privacy_level:
+                epsilon = get_recommended_epsilon(privacy_level)
+            
+            if epsilon is not None:
+                logger.info(f"Applying differential privacy with ε={epsilon}, mechanism={mechanism}")
+                
+                # Apply DP noise to synthetic data
+                synthetic_data, privacy_info = apply_differential_privacy(
+                    synthetic_data=synthetic_data,
+                    epsilon=epsilon,
+                    mechanism=mechanism,
+                    original_data=df,  # Original data for bounds
+                    clip_to_bounds=clip_to_bounds
+                )
+                
+                logger.info(f"Differential privacy applied successfully")
+            else:
+                logger.warning("Differential privacy config found but no epsilon or privacy_level specified")
+        else:
+            logger.info("No differential privacy configuration in config file")
+        
         # Save metadata and fill info
         metadata.save_to_json(self.output().path.replace('.pkl', '_metadata.json'))
         
@@ -291,6 +327,13 @@ class SDVGen(luigi.Task):
         with open(fill_info_path, 'w') as f:
             json.dump(fill_info, f, indent=2)
         logger.info(f"Missing value handling info saved to: {fill_info_path}")
+        
+        # Save privacy info
+        if privacy_info.get('applied', False):
+            privacy_info_path = self.output().path.replace('.pkl', '_privacy_info.json')
+            with open(privacy_info_path, 'w') as f:
+                json.dump(privacy_info, f, indent=2)
+            logger.info(f"Differential privacy info saved to: {privacy_info_path}")
 
         # Save synthetic data
         synthetic_data.to_parquet(data_out)
