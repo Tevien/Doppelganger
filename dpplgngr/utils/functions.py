@@ -195,8 +195,20 @@ def diff(_df, **kwargs):
     end_col = kwargs.get('end', None)
     level = kwargs.get('level', None)
 
-    series_start = getattr(_df, start_col)
-    series_end = getattr(_df,end_col)
+    # Use bracket notation instead of getattr to access columns
+    # Add better error handling with column information
+    try:
+        series_start = _df[start_col]
+    except KeyError:
+        available_cols = _df.columns.tolist()
+        raise KeyError(f"Column '{start_col}' not found in dataframe. Available columns: {available_cols}")
+    
+    try:
+        series_end = _df[end_col]
+    except KeyError:
+        available_cols = _df.columns.tolist()
+        raise KeyError(f"Column '{end_col}' not found in dataframe. Available columns: {available_cols}")
+    
     if level == "year":
         # Check if any series is datetime
         if series_start.dtype == 'datetime64[ns]':

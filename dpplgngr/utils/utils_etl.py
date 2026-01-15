@@ -245,18 +245,38 @@ def safe_merge(_df, _df_pp):
                 logging.error(f"_df index: {_df.index}")
                 raise e2
     
-    _df_pp_20 = _df_pp.head(20)
     logging.info("df_pp postmerge")
-    logging.info(_df_pp_20)
+    logging.info(f"Columns after merge: {_df_pp.columns.tolist()}")
     logging.info(f"Shape after merge: {dask_shape(_df_pp)}")
-    return _df_pp
+    
+    # Normalize schema across all partitions to prevent schema mismatch errors
+    # This must happen before any computation (including .head())
+    _df_pp, pa_schema = normalize_dask_schema(_df_pp)
+    
+    # Now we can safely sample for logging
+    try:
+        _df_pp_20 = _df_pp.head(20)
+        logging.info("Sample of merged data:")
+        logging.info(_df_pp_20)
+    except Exception as e:
+        logging.warning(f"Could not compute sample after merge: {e}")
+    
+    return _df_pp, pa_schema
 
 def standardize_dataframe_for_merge(df):
     """
     Standardize a DataFrame for consistent merging by normalizing data types
     and structures that commonly change during Parquet I/O operations.
+    
+    For Dask DataFrames, this does minimal work to avoid triggering computation.
+    The real normalization happens in normalize_dask_schema after merging.
     """
-    # Work with a copy to avoid modifying the original
+    # For Dask DataFrames, just return as-is to avoid premature computation
+    # Schema normalization will happen after merge in normalize_dask_schema
+    if isinstance(df, dd.DataFrame):
+        return df
+    
+    # Work with a copy to avoid modifying the original (pandas only)
     df_std = df.copy()
     
     # Handle index normalization
@@ -269,7 +289,7 @@ def standardize_dataframe_for_merge(df):
             # Convert categorical index to object
             df_std.index = df_std.index.astype(str)
     
-    # Handle column data types
+    # Handle column data types (pandas only at this point)
     for col in df_std.columns:
         # Handle float columns that might have been integers
         if pd.api.types.is_float_dtype(df_std[col]):
@@ -277,9 +297,13 @@ def standardize_dataframe_for_merge(df):
             non_null_values = df_std[col].dropna()
             if len(non_null_values) > 0:
                 # Check if all values are whole numbers
-                if all(non_null_values == non_null_values.astype(int)):
-                    # Convert to nullable integer type
-                    df_std[col] = df_std[col].astype('Int64')
+                try:
+                    if (non_null_values == non_null_values.astype(int)).all():
+                        # Convert to nullable integer type
+                        df_std[col] = df_std[col].astype('Int64')
+                except:
+                    # If conversion fails, keep as float
+                    pass
         
         # Handle categorical columns
         elif pd.api.types.is_categorical_dtype(df_std[col]):
@@ -293,6 +317,125 @@ def standardize_dataframe_for_merge(df):
         # Handle object columns that might need string conversion
         elif df_std[col].dtype == 'object':
             # Ensure all values are strings (for consistent comparison)
-            df_std[col] = df_std[col].astype(str)
+            try:
+                df_std[col] = df_std[col].astype(str)
+            except:
+                pass
     
     return df_std
+
+def normalize_dask_schema(df):
+    """
+    Normalize the schema across all partitions of a Dask DataFrame.
+    This ensures consistent data types across partitions before saving to Parquet.
+    
+    Args:
+        df: dask.dataframe.DataFrame to normalize
+        
+    Returns:
+        tuple: (dask.dataframe.DataFrame with consistent schema, pyarrow.Schema or None)
+    """
+    if not isinstance(df, dd.DataFrame):
+        # If it's a pandas DataFrame, just return it with no schema
+        return df, None
+    
+    logging.info("Normalizing Dask DataFrame schema across partitions...")
+    
+    try:
+        # Build a dtype mapping that's safe for all partitions
+        dtype_map = {}
+        for col in df.columns:
+            current_dtype = df[col].dtype
+            
+            # For object/string columns, keep as object
+            if current_dtype == 'object' or str(current_dtype) == 'string' or 'string' in str(current_dtype):
+                dtype_map[col] = 'object'
+            # For datetime/timedelta, keep as-is
+            elif pd.api.types.is_datetime64_any_dtype(current_dtype):
+                dtype_map[col] = current_dtype
+            elif pd.api.types.is_timedelta64_dtype(current_dtype):
+                dtype_map[col] = current_dtype
+            # For float columns, keep as float64
+            elif pd.api.types.is_float_dtype(current_dtype):
+                dtype_map[col] = 'float64'
+            # For ALL integer columns (including non-nullable), convert to float64
+            # This prevents IntCastingNaNError when there are NaN values
+            elif pd.api.types.is_integer_dtype(current_dtype):
+                dtype_map[col] = 'float64'
+            else:
+                dtype_map[col] = current_dtype
+        
+        logging.info(f"Applying dtype conversions: {dtype_map}")
+        
+        # Define a function to normalize each partition
+        def normalize_partition(partition, dtype_map=dtype_map):
+            """Normalize a single partition to have consistent types"""
+            for col, target_dtype in dtype_map.items():
+                if col in partition.columns:
+                    try:
+                        # Special handling for object/string types
+                        if target_dtype == 'object':
+                            # Convert to string, handling None/NaN
+                            partition[col] = partition[col].astype('object')
+                        else:
+                            partition[col] = partition[col].astype(target_dtype)
+                    except Exception as e:
+                        logging.warning(f"Partition-level conversion failed for {col} to {target_dtype}: {e}")
+                        # Fallback to object
+                        try:
+                            partition[col] = partition[col].astype('object')
+                        except:
+                            pass
+            return partition
+        
+        # Create meta with the correct dtypes
+        meta_dict = {}
+        for col, dtype in dtype_map.items():
+            if dtype == 'object':
+                meta_dict[col] = pd.Series([], dtype='object')
+            elif isinstance(dtype, str):
+                meta_dict[col] = pd.Series([], dtype=dtype)
+            else:
+                meta_dict[col] = pd.Series([], dtype=dtype)
+        
+        meta = pd.DataFrame(meta_dict, index=df._meta.index[:0])
+        
+        # Apply normalization using map_partitions
+        df = df.map_partitions(normalize_partition, dtype_map=dtype_map, meta=meta)
+        
+        # Repartition to clear task graph
+        df = df.repartition(npartitions=max(df.npartitions, 1))
+        
+        # Create PyArrow schema from the meta
+        try:
+            import pyarrow as pa
+            # Convert meta to pyarrow to get the schema
+            pa_schema = pa.Schema.from_pandas(meta, preserve_index=True)
+            logging.info(f"Created PyArrow schema: {pa_schema}")
+        except Exception as e:
+            logging.warning(f"Could not create PyArrow schema: {e}")
+            pa_schema = None
+        
+        logging.info("Schema normalization complete.")
+        return df, pa_schema
+        
+    except Exception as e:
+        logging.error(f"Error during schema normalization: {e}")
+        logging.info("Attempting fallback: compute and recreate...")
+        try:
+            # Last resort: compute entire dataframe and recreate
+            df_pandas = df.compute()
+            df = dd.from_pandas(df_pandas, npartitions=max(len(df_pandas) // 10000, 1))
+            logging.info("Fallback successful - dataframe recomputed.")
+            
+            # Create schema from the computed dataframe
+            try:
+                import pyarrow as pa
+                pa_schema = pa.Schema.from_pandas(df_pandas, preserve_index=True)
+            except:
+                pa_schema = None
+            
+            return df, pa_schema
+        except Exception as e2:
+            logging.error(f"Fallback also failed: {e2}")
+            raise
