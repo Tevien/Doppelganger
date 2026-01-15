@@ -1,0 +1,23 @@
+# Graph Imputation Model Requirements
+# Add these to your main requirements.txt or install separately
+
+# Core dependencies
+torch>=2.0.0
+torch-geometric>=2.3.0
+torch-scatter>=2.1.0
+torch-sparse>=0.6.15
+
+# Data processing
+pandas>=1.3.0
+numpy>=1.21.0
+scikit-learn>=1.0.0
+
+# Visualization
+matplotlib>=3.4.0
+seaborn>=0.11.0
+
+# Pipeline (already in Doppelganger)
+luigi>=3.0.0
+
+# Optional: For GPU acceleration
+# torch-cuda (install appropriate version for your CUDA)

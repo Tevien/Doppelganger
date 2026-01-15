@@ -167,3 +167,8 @@ data/*
 log/*
 scripts/*
 WIP/*
+genscripts
+genscripts/*
+studies
+studies/*
+rtf_checkpoints
