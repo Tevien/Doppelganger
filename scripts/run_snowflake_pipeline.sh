@@ -21,7 +21,7 @@
 # Options:
 #   --snow-cli-path <path>        Path to snow CLI bin/activate (default: auto-detect)
 #   --snowflake-home <path>       Path to Snowflake home directory
-#   --key-passphrase <pass>       Private key passphrase (or set SNOWFLAKE_KEY_PASSPHRASE env var)
+#   --key-passphrase <pass>       Private key passphrase (or set PRIVATE_KEY_PASSPHRASE env var)
 #   --work-dir <path>             Working directory for intermediate files (default: /scratch/sbenson)
 #   --gen-config <path>           Path to generation config (default: config/synth.json)
 #   --skip-etl                    Skip ETL preprocessing step (use existing tables)
@@ -41,7 +41,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SNOW_CLI_PATH="${SNOW_CLI_PATH:-}"
 SNOWFLAKE_HOME="${SNOWFLAKE_HOME:-/home/sandbox/sbenson/snowflake}"
-SNOWFLAKE_KEY_PASSPHRASE="${SNOWFLAKE_KEY_PASSPHRASE:-}"
+PRIVATE_KEY_PASSPHRASE="${PRIVATE_KEY_PASSPHRASE:-}"
 WORK_DIR="${WORK_DIR:-/scratch/sbenson}"
 GEN_CONFIG="${PROJECT_ROOT}/config/synth.json"
 SKIP_ETL=false
@@ -85,7 +85,7 @@ Arguments:
 Options:
     --snow-cli-path <path>        Path to snow CLI bin/activate (default: auto-detect)
     --snowflake-home <path>       Path to Snowflake home directory (default: /home/sandbox/sbenson/snowflake)
-    --key-passphrase <pass>       Private key passphrase (or set SNOWFLAKE_KEY_PASSPHRASE env var)
+    --key-passphrase <pass>       Private key passphrase (or set PRIVATE_KEY_PASSPHRASE env var)
     --work-dir <path>             Working directory (default: /scratch/sbenson)
     --gen-config <path>           Generation config path (default: config/synth.json)
     --skip-etl                    Skip ETL preprocessing step
@@ -123,7 +123,7 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         --key-passphrase)
-            SNOWFLAKE_KEY_PASSPHRASE="$2"
+            PRIVATE_KEY_PASSPHRASE="$2"
             shift 2
             ;;
         --work-dir)
@@ -220,8 +220,8 @@ log_info "========================================="
 
 # Export Snowflake environment variables
 export SNOWFLAKE_HOME="$SNOWFLAKE_HOME"
-if [ -n "$SNOWFLAKE_KEY_PASSPHRASE" ]; then
-    export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="$SNOWFLAKE_KEY_PASSPHRASE"
+if [ -n "$PRIVATE_KEY_PASSPHRASE" ]; then
+    export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="$PRIVATE_KEY_PASSPHRASE"
     log_info "Private key passphrase configured"
 fi
 
