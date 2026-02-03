@@ -122,12 +122,29 @@ case "$COMMAND" in
         CONFIG_JSON=$(cat "$CONFIG_FILE" | jq -c '.')
         CONFIG_DESC=$(echo "$CONFIG_JSON" | jq -r '.description // "No description"')
         
+        # Create temporary metadata file for safe upload
+        TEMP_UPLOAD="/tmp/config_upload_${CONFIG_NAME}.json"
+        cat > "$TEMP_UPLOAD" << JSONEOF
+{
+  "config_name": "${CONFIG_NAME}",
+  "config_json": ${CONFIG_JSON},
+  "description": "${CONFIG_DESC}"
+}
+JSONEOF
+        
+        # Upload via stage to handle nested JSON safely
+        log_info "Staging configuration file..."
+        snow sql -q "PUT file://${TEMP_UPLOAD} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
+        
         snow sql -q "
             MERGE INTO ETL_CONFIGS AS target
-            USING (SELECT 
-                '${CONFIG_NAME}' AS config_name,
-                PARSE_JSON('${CONFIG_JSON}') AS config_json,
-                '${CONFIG_DESC}' AS description
+            USING (
+                SELECT 
+                    \$1:config_name::STRING AS config_name,
+                    \$1:config_json::VARIANT AS config_json,
+                    \$1:description::STRING AS description
+                FROM @~/CONFIG_STAGE/config_upload_${CONFIG_NAME}.json
+                (FILE_FORMAT => 'TYPE=JSON')
             ) AS source
             ON target.config_name = source.config_name
             WHEN MATCHED THEN
@@ -139,6 +156,8 @@ case "$COMMAND" in
                 INSERT (config_name, config_json, description)
                 VALUES (source.config_name, source.config_json, source.description);
         "
+        
+        rm -f "$TEMP_UPLOAD"
         
         log_success "Configuration uploaded: $CONFIG_NAME"
         ;;

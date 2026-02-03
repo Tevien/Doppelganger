@@ -258,7 +258,7 @@ log_info "Using configuration file: $CONFIG_FILE"
 log_info "Creating/updating stored procedure and config table..."
 snow sql -f "${SCRIPT_DIR}/snowflake_etl_procedure.sql"
 
-# Read the JSON config and escape it for SQL
+# Read the JSON config
 log_info "Reading configuration from file..."
 CONFIG_JSON=$(cat "$CONFIG_FILE" | jq -c '.')
 
@@ -272,13 +272,30 @@ CONFIG_DESC=$(echo "$CONFIG_JSON" | jq -r '.description // "No description"')
 
 log_info "Uploading configuration '$CONFIG_NAME' to ETL_CONFIGS table..."
 
-# Upload config to Snowflake (using MERGE for upsert behavior)
+# Create a temporary file with config metadata for safer upload
+CONFIG_STAGE_FILE="${WORK_DIR}/config_${CONFIG_NAME}.json"
+cat > "$CONFIG_STAGE_FILE" << JSONEOF
+{
+  "config_name": "${CONFIG_NAME}",
+  "config_json": ${CONFIG_JSON},
+  "description": "${CONFIG_DESC}"
+}
+JSONEOF
+
+# Upload the config file to Snowflake stage
+log_info "Staging configuration file..."
+snow sql -q "PUT file://${CONFIG_STAGE_FILE} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
+
+# Load from stage into table (handles nested JSON safely)
 snow sql -q "
 MERGE INTO ETL_CONFIGS AS target
-USING (SELECT 
-    '${CONFIG_NAME}' AS config_name,
-    PARSE_JSON('${CONFIG_JSON}') AS config_json,
-    '${CONFIG_DESC}' AS description
+USING (
+    SELECT 
+        \$1:config_name::STRING AS config_name,
+        \$1:config_json::VARIANT AS config_json,
+        \$1:description::STRING AS description
+    FROM @~/CONFIG_STAGE/config_${CONFIG_NAME}.json
+    (FILE_FORMAT => 'TYPE=JSON')
 ) AS source
 ON target.config_name = source.config_name
 WHEN MATCHED THEN
@@ -290,6 +307,9 @@ WHEN NOT MATCHED THEN
     INSERT (config_name, config_json, description)
     VALUES (source.config_name, source.config_json, source.description);
 "
+
+# Clean up staged file
+rm -f "$CONFIG_STAGE_FILE"
 
 if [ $? -eq 0 ]; then
     log_success "Configuration uploaded successfully"
