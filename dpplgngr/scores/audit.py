@@ -16,6 +16,9 @@ warnings.filterwarnings('ignore')
 # Import the SDV generation step as a dependency
 from dpplgngr.train.sdv import SDVGen
 
+# Import missing value handler
+from dpplgngr.utils.missing_value_handler import prepare_data_for_metrics
+
 import logging
 logger = logging.getLogger('luigi-interface')
 
@@ -145,7 +148,8 @@ class SyntheticDataAudit(luigi.Task):
         logger.info(f"Audit plots saved to: {plots_dir}")
 
 
-def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir=None):
+def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir=None, 
+                        handle_missing='conservative'):
     """
     Compare synthetic data quality against original data using SDV metrics.
     
@@ -154,17 +158,44 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
         synthetic_data (pd.DataFrame): Synthetic dataset
         metadata (dict, optional): SDV metadata for the dataset
         plots_dir (str, optional): Directory to save plots. If None, plots are shown interactively.
+        handle_missing (str, optional): Strategy for handling missing values in metrics.
+            Options: 'conservative' (median/mode), 'mean', 'none' (no filling).
+            Default: 'conservative'
     
     Returns:
         dict: Quality metrics and analysis results
     """
     
+    # Store original data shapes for reference
+    logger.info(f"Original data shape: {original_data.shape}")
+    logger.info(f"Synthetic data shape: {synthetic_data.shape}")
+    logger.info(f"Original data NaN count: {original_data.isna().sum().sum()}")
+    logger.info(f"Synthetic data NaN count: {synthetic_data.isna().sum().sum()}")
+    
+    # Prepare data for metrics if there are missing values
+    if handle_missing and handle_missing != 'none':
+        if original_data.isna().any().any() or synthetic_data.isna().any().any():
+            logger.info("Handling missing values for metric calculation...")
+            original_filled, synthetic_filled, fill_info = prepare_data_for_metrics(
+                original_data, synthetic_data, strategy=handle_missing
+            )
+        else:
+            logger.info("No missing values detected, using original data")
+            original_filled = original_data
+            synthetic_filled = synthetic_data
+            fill_info = {'strategy': 'none', 'message': 'No missing values'}
+    else:
+        logger.info("Missing value handling disabled, using original data")
+        original_filled = original_data
+        synthetic_filled = synthetic_data
+        fill_info = {'strategy': 'none', 'message': 'Disabled by user'}
+    
     # 1. SDV Quality Evaluation
     logger.info("Evaluating synthetic data quality...")
     try:
         quality_report = evaluate_quality(
-            real_data=original_data,
-            synthetic_data=synthetic_data,
+            real_data=original_filled,
+            synthetic_data=synthetic_filled,
             metadata=metadata
         )
         
@@ -175,8 +206,8 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
         # Get details for each property
         quality_details = {}
         try:
-            # Try to get all available properties
-            properties = quality_report.get_properties()
+            # SDV QualityReport has specific property names
+            properties = ['Column Shapes', 'Column Pair Trends']
             for prop in properties:
                 prop_details = quality_report.get_details(prop)
                 quality_details[prop] = prop_details
@@ -190,11 +221,12 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
         quality_score = 0.0
         quality_details = {"error": str(e)}
     
-    # 2. Missing Data Analysis
+    # 2. Missing Data Analysis (use original data with missingness preserved)
     logger.info("="*50)
     logger.info("MISSING DATA ANALYSIS")
     logger.info("="*50)
     
+    # Use ORIGINAL data for missing value analysis (not filled versions)
     original_missing = original_data.isnull().sum()
     synthetic_missing = synthetic_data.isnull().sum()
     
@@ -235,14 +267,14 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
     else:
         plt.show()
     
-    # 3. Distribution Comparison
+    # 3. Distribution Comparison (use filled data for distribution metrics)
     logger.info("="*50)
     logger.info("DISTRIBUTION ANALYSIS")
     logger.info("="*50)
     
-    # Get numeric and categorical columns
-    numeric_cols = original_data.select_dtypes(include=[np.number]).columns
-    categorical_cols = original_data.select_dtypes(include=['object', 'category']).columns
+    # Get numeric and categorical columns from filled data
+    numeric_cols = original_filled.select_dtypes(include=[np.number]).columns
+    categorical_cols = original_filled.select_dtypes(include=['object', 'category']).columns
     
     logger.info(f"Found {len(numeric_cols)} numeric columns: {list(numeric_cols)}")
     logger.info(f"Found {len(categorical_cols)} categorical columns: {list(categorical_cols)}")
@@ -255,14 +287,14 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
             axes = axes.reshape(1, -1)
         
         for i, col in enumerate(numeric_cols):
-            # Original distribution
-            axes[i, 0].hist(original_data[col].dropna(), bins=30, alpha=0.7, 
+            # Original distribution (using filled data)
+            axes[i, 0].hist(original_filled[col], bins=30, alpha=0.7, 
                            color='skyblue', label='Original')
             axes[i, 0].set_title(f'{col} - Original Data')
             axes[i, 0].set_ylabel('Frequency')
             
-            # Synthetic distribution
-            axes[i, 1].hist(synthetic_data[col].dropna(), bins=30, alpha=0.7, 
+            # Synthetic distribution (using filled data)
+            axes[i, 1].hist(synthetic_filled[col], bins=30, alpha=0.7, 
                            color='lightcoral', label='Synthetic')
             axes[i, 1].set_title(f'{col} - Synthetic Data')
             axes[i, 1].set_ylabel('Frequency')
@@ -285,15 +317,15 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
         for col in categorical_cols[:5]:  # Limit to first 5 categorical columns
             fig, axes = plt.subplots(1, 2, figsize=(15, 5))
             
-            # Original distribution
-            original_data[col].value_counts().plot(kind='bar', ax=axes[0], 
+            # Original distribution (using filled data)
+            original_filled[col].value_counts().plot(kind='bar', ax=axes[0], 
                                                   color='skyblue', alpha=0.7)
             axes[0].set_title(f'{col} - Original Data')
             axes[0].set_ylabel('Count')
             axes[0].tick_params(axis='x', rotation=45)
             
-            # Synthetic distribution
-            synthetic_data[col].value_counts().plot(kind='bar', ax=axes[1], 
+            # Synthetic distribution (using filled data)
+            synthetic_filled[col].value_counts().plot(kind='bar', ax=axes[1], 
                                                    color='lightcoral', alpha=0.7)
             axes[1].set_title(f'{col} - Synthetic Data')
             axes[1].set_ylabel('Count')
@@ -321,9 +353,8 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
     synthetic_stats = None
     if len(numeric_cols) > 0:
         logger.info("Computing statistical summaries...")
-        original_stats = original_data[numeric_cols].describe()
-        synthetic_stats = synthetic_data[numeric_cols].describe()
-        synthetic_stats = synthetic_data[numeric_cols].describe()
+        original_stats = original_filled[numeric_cols].describe()
+        synthetic_stats = synthetic_filled[numeric_cols].describe()
         
         logger.info("Original Data Statistics:")
         logger.info(f"\n{original_stats}")
@@ -344,14 +375,14 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
         
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         
-        # Original correlation matrix
-        original_corr = original_data[numeric_cols].corr()
+        # Original correlation matrix (using filled data)
+        original_corr = original_filled[numeric_cols].corr()
         sns.heatmap(original_corr, annot=True, cmap='coolwarm', center=0, 
                    ax=axes[0], fmt='.2f')
         axes[0].set_title('Original Data - Correlation Matrix')
         
-        # Synthetic correlation matrix
-        synthetic_corr = synthetic_data[numeric_cols].corr()
+        # Synthetic correlation matrix (using filled data)
+        synthetic_corr = synthetic_filled[numeric_cols].corr()
         sns.heatmap(synthetic_corr, annot=True, cmap='coolwarm', center=0, 
                    ax=axes[1], fmt='.2f')
         axes[1].set_title('Synthetic Data - Correlation Matrix')
@@ -391,7 +422,8 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
         'quality_details': quality_details,
         'missing_data_comparison': missing_comparison,
         'original_stats': original_stats,
-        'synthetic_stats': synthetic_stats
+        'synthetic_stats': synthetic_stats,
+        'missing_value_handling': fill_info  # Include info about how NaNs were handled
     }
 
 # Example usage:

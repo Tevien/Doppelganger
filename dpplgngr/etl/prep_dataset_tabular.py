@@ -97,7 +97,7 @@ class ConvertLargeFiles(luigi.Task):
         if not outdir:
             name = input_json.get('name', None)
             outdir = f"data/{name}/preprocessing"
-        return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
+        return luigi.LocalTarget(os.path.join(outdir, str(self.lu_output_path)))
     
     def run(self):
         # Load input json
@@ -163,7 +163,7 @@ class PreProcess(luigi.Task):
             outdir = f"data/{name}/preprocessing"
         logging.info(f"Output directory: {outdir}")
         logging.info(f"Output path: {self.lu_output_path}")
-        return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
+        return luigi.LocalTarget(os.path.join(outdir, str(self.lu_output_path)))
     
     def check_snowflake_table_exists(self, session, schema, table_name):
         """Check if a table exists in Snowflake schema"""
@@ -617,7 +617,7 @@ class TuplesProcess(luigi.Task):
         if not outdir:
             name = input_json.get('name', None)
             outdir = f"data/{name}/preprocessing"
-        return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
+        return luigi.LocalTarget(os.path.join(outdir, str(self.lu_output_path)))
     
     def load_snowflake_preprocessed_data(self, session, input_json):
         """Load preprocessed data from Snowflake table"""
@@ -660,6 +660,9 @@ class TuplesProcess(luigi.Task):
         # Tuple columns to process
         tuple_cols_after = input_json.get('tuple_vals_after', None)
         tuple_cols_anybefore = input_json.get('tuple_vals_anybefore', None)
+        # Get fallback option (default to False for backward compatibility)
+        enable_fallback = input_json.get('enable_fallback', False)
+        logging.info(f"TuplesProcess: enable_fallback = {enable_fallback}")
         if not tuple_cols_anybefore and not tuple_cols_after:
             logging.info("No tuple columns specified, skipping")
             if source == 'SNOWFLAKE' and self.snowpark_session:
@@ -691,7 +694,7 @@ class TuplesProcess(luigi.Task):
         if not tuple_cols_after:
             tuple_cols_after = []
 
-        def process_tuple(row, _col_tuple, ref_date_col, after=True):
+        def process_tuple(row, _col_tuple, ref_date_col, after=True, enable_fallback=False):
             # First find the reference date
             ref_date = row[ref_date_col]
             # Then get the tuple column
@@ -736,11 +739,14 @@ class TuplesProcess(luigi.Task):
             
             # Parse dates using dateutil parser for automatic format detection
             parsed_dates = []
-            for date in dates:
+            measurements_without_dates = []  # Track measurements that don't have valid dates
+            for idx, date in enumerate(dates):
                 try:
                     parsed_dates.append(parser.parse(str(date)))
                 except (ValueError, TypeError):
                     parsed_dates.append(pd.NaT)
+                    # Store measurement with invalid date for potential fallback
+                    measurements_without_dates.append(measurements[idx])
             dates = pd.Series(parsed_dates)
             
             try:
@@ -750,6 +756,13 @@ class TuplesProcess(luigi.Task):
             
             # Handle case where no valid dates
             if all(pd.isnull(dates)):
+                # If fallback is enabled and we have measurements without dates, use the first one
+                if enable_fallback and len(measurements_without_dates) > 0:
+                    fallback_value = measurements_without_dates[0]
+                    # Convert string measurements to 1.0
+                    if isinstance(fallback_value, str):
+                        return 1.0
+                    return fallback_value
                 return np.nan
             
             sorted_indices = np.argsort(dates)
@@ -776,6 +789,13 @@ class TuplesProcess(luigi.Task):
                     except TypeError:
                         print(f"TypeError comparing dates: {date} and {ref_date_parsed}")
                         print(f"Types: {type(date)} and {type(ref_date_parsed)}")
+                # If none found, use fallback if enabled
+                if enable_fallback and len(measurements_without_dates) > 0:
+                    fallback_value = measurements_without_dates[0]
+                    # Convert string measurements to 1.0
+                    if isinstance(fallback_value, str):
+                        return 1.0
+                    return fallback_value
                 return np.nan  # If none found, return NaN
             else:
                 # Find the first measurement before the reference date
@@ -784,12 +804,19 @@ class TuplesProcess(luigi.Task):
                         continue
                     if date < ref_date_parsed:
                         return meas
+                # If none found, use fallback if enabled
+                if enable_fallback and len(measurements_without_dates) > 0:
+                    fallback_value = measurements_without_dates[0]
+                    # Convert string measurements to 1.0
+                    if isinstance(fallback_value, str):
+                        return 1.0
+                    return fallback_value
             return np.nan  # If none found, return NaN
 
         for t in tuple_cols_after:
-            ddf[t + '_FIRST_AFTER'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, True), meta=(t + '_FIRST_AFTER', 'float32'))
+            ddf[t + '_FIRST_AFTER'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, True, enable_fallback), meta=(t + '_FIRST_AFTER', 'float32'))
         for t in tuple_cols_anybefore:
-            ddf[t + '_ANY_BEFORE'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, False), meta=(t + '_ANY_BEFORE', 'float32'))
+            ddf[t + '_ANY_BEFORE'] = ddf.apply(process_tuple, axis=1, args=(t, ref_date_col, False, enable_fallback), meta=(t + '_ANY_BEFORE', 'float32'))
 
         # Make analysis of dataframe (only for non-Snowflake sources)
         if source != 'SNOWFLAKE':
@@ -887,7 +914,7 @@ class ImputeScaleCategorize(luigi.Task):
         if not outdir:
             name = input_json.get('name', None)
             outdir = f"data/{name}/preprocessing"
-        return luigi.LocalTarget(os.path.join(outdir, self.lu_output_path))
+        return luigi.LocalTarget(os.path.join(outdir, str(self.lu_output_path)))
     
     def run(self):
         with open(self.etl_config, 'r') as f:
