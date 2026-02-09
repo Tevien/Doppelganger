@@ -134,6 +134,7 @@ JSONEOF
         
         # Upload via stage to handle nested JSON safely
         log_info "Staging configuration file..."
+        snow sql -q "CREATE FILE FORMAT IF NOT EXISTS JSON_CONFIG_FORMAT TYPE = JSON;" > /dev/null
         snow sql -q "PUT file://${TEMP_UPLOAD} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
         
         snow sql -q "
@@ -144,7 +145,7 @@ JSONEOF
                     \$1:config_json::VARIANT AS config_json,
                     \$1:description::STRING AS description
                 FROM @~/CONFIG_STAGE/config_upload_${CONFIG_NAME}.json
-                (FILE_FORMAT => (TYPE = JSON))
+                (FILE_FORMAT => 'JSON_CONFIG_FORMAT')
             ) AS source
             ON target.config_name = source.config_name
             WHEN MATCHED THEN

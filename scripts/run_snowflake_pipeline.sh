@@ -286,6 +286,9 @@ JSONEOF
 log_info "Staging configuration file..."
 snow sql -q "PUT file://${CONFIG_STAGE_FILE} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
 
+# Create a named file format for JSON (idempotent)
+snow sql -q "CREATE FILE FORMAT IF NOT EXISTS JSON_CONFIG_FORMAT TYPE = JSON;" > /dev/null
+
 # Load from stage into table (handles nested JSON safely)
 snow sql -q "
 MERGE INTO ETL_CONFIGS AS target
@@ -295,7 +298,7 @@ USING (
         \$1:config_json::VARIANT AS config_json,
         \$1:description::STRING AS description
     FROM @~/CONFIG_STAGE/config_${CONFIG_NAME}.json
-    (FILE_FORMAT => (TYPE = JSON))
+    (FILE_FORMAT => 'JSON_CONFIG_FORMAT')
 ) AS source
 ON target.config_name = source.config_name
 WHEN MATCHED THEN
