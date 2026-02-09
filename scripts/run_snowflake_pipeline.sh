@@ -340,7 +340,7 @@ if [ "$SKIP_ETL" = false ]; then
     
     # Call the stored procedure
     log_info "Calling ETL stored procedure with configuration: $CONFIG_NAME"
-    ETL_RESULT=$(snow sql -q "CALL dpplgngr_etl_pipeline('${CONFIG_NAME}');" --format json | jq -r '.[0]."DPPLGNGR_ETL_PIPELINE(\047${CONFIG_NAME}\047)"')
+    ETL_RESULT=$(snow sql -q "CALL dpplgngr_etl_pipeline('${CONFIG_NAME}');" --format json | jq -r '.[0] | to_entries[0].value')
     
     if [[ "$ETL_RESULT" == ERROR:* ]]; then
         log_error "ETL preprocessing failed:"
