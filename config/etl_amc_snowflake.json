@@ -94,7 +94,7 @@
 
     "tuple_vals_after": ["CREATININE",
         "EGFR", "NATRIUM", "KALIUM", "HEMOGLOBIN", "LACTATE", "BICARBONATE", "CHLORIDE", "PCO2", "PH",
-        "GLUCOSE", "CALCIUM", "HEMATOCRIT", "BASE_EXCESS", "TEMPERATURE"],
+        "GLUCOSE", "CALCIUM", "BASE_EXCESS"],
     "tuple_vals_anybefore": ["ACE", "BETA", "T2DM", "ACUTE_MI", "AF"],
 
     "ref_date": "OPNAMEDATUM",
