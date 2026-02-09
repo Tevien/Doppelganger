@@ -137,16 +137,16 @@ JSONEOF
         snow sql -q "PUT file://${TEMP_UPLOAD} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
         
         # Load via COPY INTO temp table (inline FILE_FORMAT, no CREATE FILE FORMAT privilege needed)
-        snow sql -q "CREATE TEMPORARY TABLE IF NOT EXISTS ETL_CONFIGS_STAGING (raw VARIANT);" > /dev/null
-        snow sql -q "TRUNCATE TABLE ETL_CONFIGS_STAGING;" > /dev/null
+        # All statements in a single session so the temporary table persists
         snow sql -q "
+            CREATE TEMPORARY TABLE IF NOT EXISTS ETL_CONFIGS_STAGING (raw VARIANT);
+            TRUNCATE TABLE ETL_CONFIGS_STAGING;
+
             COPY INTO ETL_CONFIGS_STAGING
             FROM @~/CONFIG_STAGE/config_upload_${CONFIG_NAME}.json
             FILE_FORMAT = (TYPE = JSON)
             PURGE = FALSE;
-        " > /dev/null
-        
-        snow sql -q "
+
             MERGE INTO ETL_CONFIGS AS target
             USING (
                 SELECT 
@@ -164,9 +164,9 @@ JSONEOF
             WHEN NOT MATCHED THEN
                 INSERT (config_name, config_json, description)
                 VALUES (source.config_name, source.config_json, source.description);
+
+            DROP TABLE IF EXISTS ETL_CONFIGS_STAGING;
         "
-        
-        snow sql -q "DROP TABLE IF EXISTS ETL_CONFIGS_STAGING;" > /dev/null
         
         rm -f "$TEMP_UPLOAD"
         

@@ -287,17 +287,17 @@ log_info "Staging configuration file..."
 snow sql -q "PUT file://${CONFIG_STAGE_FILE} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
 
 # Load from stage via COPY INTO temp table (inline FILE_FORMAT, no CREATE FILE FORMAT privilege needed)
+# All statements in a single session so the temporary table persists
 log_info "Loading configuration into Snowflake..."
-snow sql -q "CREATE TEMPORARY TABLE IF NOT EXISTS ETL_CONFIGS_STAGING (raw VARIANT);" > /dev/null
-snow sql -q "TRUNCATE TABLE ETL_CONFIGS_STAGING;" > /dev/null
 snow sql -q "
+CREATE TEMPORARY TABLE IF NOT EXISTS ETL_CONFIGS_STAGING (raw VARIANT);
+TRUNCATE TABLE ETL_CONFIGS_STAGING;
+
 COPY INTO ETL_CONFIGS_STAGING
 FROM @~/CONFIG_STAGE/config_${CONFIG_NAME}.json
 FILE_FORMAT = (TYPE = JSON)
 PURGE = FALSE;
-" > /dev/null
 
-snow sql -q "
 MERGE INTO ETL_CONFIGS AS target
 USING (
     SELECT 
@@ -315,9 +315,9 @@ WHEN MATCHED THEN
 WHEN NOT MATCHED THEN
     INSERT (config_name, config_json, description)
     VALUES (source.config_name, source.config_json, source.description);
-"
 
-snow sql -q "DROP TABLE IF EXISTS ETL_CONFIGS_STAGING;" > /dev/null
+DROP TABLE IF EXISTS ETL_CONFIGS_STAGING;
+"
 
 # Clean up staged file
 rm -f "$CONFIG_STAGE_FILE"
