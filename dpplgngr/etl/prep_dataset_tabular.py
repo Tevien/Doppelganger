@@ -1135,42 +1135,62 @@ class FillNaN(luigi.Task):
         # Get a sample to determine column types
         sample_df = ddf.head(1000)
         
+        # Helper to determine if a dtype is string-like (including Arrow-backed string types)
+        def _is_string_dtype(dtype):
+            """Check if dtype is string-like, including PyArrow-backed string types."""
+            if pd.api.types.is_string_dtype(dtype) or pd.api.types.is_object_dtype(dtype):
+                return True
+            # Check for Arrow-backed string/binary types (e.g. ArrowDtype(pa.string()))
+            dtype_str = str(dtype).lower()
+            if 'string' in dtype_str or 'utf8' in dtype_str or 'large_string' in dtype_str or 'bytes' in dtype_str:
+                return True
+            try:
+                import pyarrow as pa
+                if hasattr(dtype, 'pyarrow_dtype'):
+                    return pa.types.is_string(dtype.pyarrow_dtype) or pa.types.is_large_string(dtype.pyarrow_dtype) or pa.types.is_binary(dtype.pyarrow_dtype)
+            except ImportError:
+                pass
+            return False
+        
         # Process each column with null values
         for col in ddf.columns:
             # Check if column has any null values
             null_count = ddf[col].isnull().sum().compute()
             
             if null_count > 0:
-                logging.info(f"Column '{col}' has {null_count} null values")
+                logging.info(f"Column '{col}' has {null_count} null values (dtype: {ddf[col].dtype})")
                 
-                # Determine the data type of non-null values
-                non_null_sample = sample_df[col].dropna()
+                # First check the column dtype directly (most reliable, especially for Arrow-backed types)
+                col_dtype = ddf[col].dtype
                 
-                if len(non_null_sample) > 0:
-                    # Determine appropriate fill value based on type
-                    if pd.api.types.is_numeric_dtype(non_null_sample):
-                        # For numeric types, fill with 0
-                        fill_value = 0
-                        logging.info(f"  Filling '{col}' with numeric default: {fill_value}")
-                    elif pd.api.types.is_bool_dtype(non_null_sample):
-                        # For boolean types, fill with False
-                        fill_value = False
-                        logging.info(f"  Filling '{col}' with boolean default: {fill_value}")
-                    elif pd.api.types.is_datetime64_any_dtype(non_null_sample):
-                        # For datetime types, fill with epoch (1970-01-01)
-                        fill_value = pd.Timestamp('1970-01-01')
-                        logging.info(f"  Filling '{col}' with datetime default: {fill_value}")
-                    else:
-                        # For string/object types, fill with empty string
-                        fill_value = ""
-                        logging.info(f"  Filling '{col}' with string default: '{fill_value}'")
-                    
-                    # Apply the fill
-                    ddf[col] = ddf[col].fillna(fill_value)
+                if _is_string_dtype(col_dtype):
+                    # For string/object/Arrow string types, fill with empty string
+                    fill_value = ""
+                    logging.info(f"  Filling '{col}' with string default: '{fill_value}' (dtype: {col_dtype})")
+                elif pd.api.types.is_bool_dtype(col_dtype):
+                    # For boolean types, fill with False
+                    fill_value = False
+                    logging.info(f"  Filling '{col}' with boolean default: {fill_value}")
+                elif pd.api.types.is_datetime64_any_dtype(col_dtype):
+                    # For datetime types, fill with epoch (1970-01-01)
+                    fill_value = pd.Timestamp('1970-01-01')
+                    logging.info(f"  Filling '{col}' with datetime default: {fill_value}")
+                elif pd.api.types.is_numeric_dtype(col_dtype):
+                    # For numeric types, fill with 0
+                    fill_value = 0
+                    logging.info(f"  Filling '{col}' with numeric default: {fill_value}")
                 else:
-                    # If all values are null, fill with 0 as a safe default
-                    logging.warning(f"  Column '{col}' is entirely null, filling with 0")
-                    ddf[col] = ddf[col].fillna(0)
+                    # Unknown dtype — use sample values as fallback
+                    non_null_sample = sample_df[col].dropna()
+                    if len(non_null_sample) > 0 and pd.api.types.is_numeric_dtype(non_null_sample):
+                        fill_value = 0
+                        logging.info(f"  Filling '{col}' with numeric default (from sample): {fill_value}")
+                    else:
+                        # Default to empty string as safest option for unknown types
+                        fill_value = ""
+                        logging.info(f"  Filling '{col}' with string default (fallback): '{fill_value}' (dtype: {col_dtype})")
+                
+                ddf[col] = ddf[col].fillna(fill_value)
         
         # Verify no nulls remain
         remaining_nulls = ddf.isnull().sum().sum().compute()
