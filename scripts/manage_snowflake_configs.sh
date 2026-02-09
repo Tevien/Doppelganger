@@ -39,6 +39,7 @@ Commands:
     export <config_name> [file]   Export a configuration to JSON file
 
 Options:
+    --warehouse <name>            Snowflake warehouse to use
     -h, --help                    Show this help message
 
 Examples:
@@ -65,13 +66,39 @@ if [ $# -eq 0 ]; then
     usage
 fi
 
+# Parse optional --warehouse flag (can appear before or after command)
+WAREHOUSE=""
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --warehouse)
+            WAREHOUSE="$2"
+            shift 2
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${ARGS[@]}"
+
+# Wrapper function for snow sql with warehouse
+snow_sql() {
+    if [ -n "$WAREHOUSE" ]; then
+        snow sql --warehouse "$WAREHOUSE" "$@"
+    else
+        snow sql "$@"
+    fi
+}
+
 COMMAND="$1"
 shift
 
 case "$COMMAND" in
     list)
         log_info "Listing all configurations in Snowflake..."
-        snow sql -q "
+        snow_sql -q "
             SELECT 
                 config_name,
                 description,
@@ -90,7 +117,7 @@ case "$COMMAND" in
         fi
         CONFIG_NAME="$1"
         log_info "Showing configuration: $CONFIG_NAME"
-        snow sql -q "
+        snow_sql -q "
             SELECT 
                 config_name,
                 description,
@@ -134,11 +161,11 @@ JSONEOF
         
         # Upload via stage to handle nested JSON safely
         log_info "Staging configuration file..."
-        snow sql -q "PUT file://${TEMP_UPLOAD} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
+        snow_sql -q "PUT file://${TEMP_UPLOAD} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
         
         # Load via COPY INTO temp table (inline FILE_FORMAT, no CREATE FILE FORMAT privilege needed)
         # All statements in a single session so the temporary table persists
-        snow sql -q "
+        snow_sql -q "
             CREATE TEMPORARY TABLE IF NOT EXISTS ETL_CONFIGS_STAGING (raw VARIANT);
             TRUNCATE TABLE ETL_CONFIGS_STAGING;
 
@@ -185,7 +212,7 @@ JSONEOF
         log_info "Exporting configuration: $CONFIG_NAME"
         log_info "Output file: $OUTPUT_FILE"
         
-        snow sql -q "
+        snow_sql -q "
             SELECT config_json
             FROM ETL_CONFIGS 
             WHERE config_name = '${CONFIG_NAME}'
@@ -216,7 +243,7 @@ JSONEOF
         fi
         
         log_info "Deleting configuration: $CONFIG_NAME"
-        snow sql -q "DELETE FROM ETL_CONFIGS WHERE config_name = '${CONFIG_NAME}'"
+        snow_sql -q "DELETE FROM ETL_CONFIGS WHERE config_name = '${CONFIG_NAME}'"
         
         log_success "Configuration deleted: $CONFIG_NAME"
         ;;

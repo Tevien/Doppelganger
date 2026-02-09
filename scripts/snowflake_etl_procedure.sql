@@ -7,9 +7,13 @@ CREATE TABLE IF NOT EXISTS ETL_CONFIGS (
     config_name VARCHAR PRIMARY KEY,
     config_json VARIANT NOT NULL,
     description VARCHAR,
+    config_hash VARCHAR,
     created_date TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     updated_date TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
+
+-- Add config_hash column if table already exists without it
+ALTER TABLE ETL_CONFIGS ADD COLUMN IF NOT EXISTS config_hash VARCHAR;
 
 CREATE OR REPLACE PROCEDURE dpplgngr_etl_pipeline(CONFIG_NAME VARCHAR)
 RETURNS STRING

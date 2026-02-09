@@ -30,6 +30,8 @@
 #   --skip-privacy                Skip privacy evaluation step
 #   --skip-upload                 Skip uploading results to Snowflake
 #   --output-table <name>         Name for output table in Snowflake (default: <config_name>_SYNTHETIC_DATA)
+#   --warehouse <name>            Snowflake warehouse to use (default: connection default)
+#   --force-etl                   Force ETL reprocessing even if config hasn't changed
 #
 ################################################################################
 
@@ -50,6 +52,7 @@ SKIP_AUDIT=false
 SKIP_PRIVACY=false
 SKIP_UPLOAD=false
 OUTPUT_TABLE=""
+WAREHOUSE=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -94,10 +97,12 @@ Options:
     --skip-privacy                Skip privacy evaluation step
     --skip-upload                 Skip uploading results to Snowflake
     --output-table <name>         Output table name (default: <config_name>_SYNTHETIC_DATA)
+    --warehouse <name>            Snowflake warehouse to use (default: connection default)
+    --force-etl                   Force ETL reprocessing even if config hasn't changed
     -h, --help                    Show this help message
 
 Example:
-    $0 amc_hf_complete --work-dir /scratch/sbenson
+    $0 amc_hf_complete --work-dir /scratch/sbenson --warehouse COMPUTE_WH
 
 EOF
     exit 1
@@ -158,6 +163,14 @@ while [ $# -gt 0 ]; do
             OUTPUT_TABLE="$2"
             shift 2
             ;;
+        --warehouse)
+            WAREHOUSE="$2"
+            shift 2
+            ;;
+        --force-etl)
+            FORCE_ETL=true
+            shift
+            ;;
         -h|--help)
             usage
             ;;
@@ -172,6 +185,9 @@ done
 if [ -z "$OUTPUT_TABLE" ]; then
     OUTPUT_TABLE="${CONFIG_NAME}_SYNTHETIC_DATA"
 fi
+
+# Default force ETL to false
+FORCE_ETL=${FORCE_ETL:-false}
 
 # Auto-detect snow CLI if not provided
 if [ -z "$SNOW_CLI_PATH" ]; then
@@ -209,6 +225,21 @@ fi
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 
+# Build warehouse flag for snow sql commands
+WAREHOUSE_FLAG=""
+if [ -n "$WAREHOUSE" ]; then
+    WAREHOUSE_FLAG="--warehouse $WAREHOUSE"
+fi
+
+# Wrapper function for snow sql with warehouse
+snow_sql() {
+    if [ -n "$WAREHOUSE_FLAG" ]; then
+        snow sql $WAREHOUSE_FLAG "$@"
+    else
+        snow sql "$@"
+    fi
+}
+
 log_info "========================================="
 log_info "Snowflake ETL Pipeline Orchestrator"
 log_info "========================================="
@@ -216,6 +247,11 @@ log_info "Configuration: $CONFIG_NAME"
 log_info "Working directory: $WORK_DIR"
 log_info "Snowflake home: $SNOWFLAKE_HOME"
 log_info "Output table: $OUTPUT_TABLE"
+if [ -n "$WAREHOUSE" ]; then
+    log_info "Warehouse: $WAREHOUSE"
+else
+    log_info "Warehouse: (connection default)"
+fi
 log_info "========================================="
 
 # Export Snowflake environment variables
@@ -256,7 +292,7 @@ log_info "Using configuration file: $CONFIG_FILE"
 
 # First, ensure the stored procedure and config table are created
 log_info "Creating/updating stored procedure and config table..."
-snow sql -f "${SCRIPT_DIR}/snowflake_etl_procedure.sql"
+snow_sql -f "${SCRIPT_DIR}/snowflake_etl_procedure.sql"
 
 # Read the JSON config
 log_info "Reading configuration from file..."
@@ -284,12 +320,12 @@ JSONEOF
 
 # Upload the config file to Snowflake stage
 log_info "Staging configuration file..."
-snow sql -q "PUT file://${CONFIG_STAGE_FILE} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
+snow_sql -q "PUT file://${CONFIG_STAGE_FILE} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
 
 # Load from stage via COPY INTO temp table (inline FILE_FORMAT, no CREATE FILE FORMAT privilege needed)
 # All statements in a single session so the temporary table persists
 log_info "Loading configuration into Snowflake..."
-snow sql -q "
+snow_sql -q "
 CREATE TEMPORARY TABLE IF NOT EXISTS ETL_CONFIGS_STAGING (raw VARIANT);
 TRUNCATE TABLE ETL_CONFIGS_STAGING;
 
@@ -338,17 +374,57 @@ if [ "$SKIP_ETL" = false ]; then
     log_info "Step 2: Running ETL preprocessing in Snowflake"
     log_info "========================================="
     
-    # Call the stored procedure
-    log_info "Calling ETL stored procedure with configuration: $CONFIG_NAME"
-    ETL_RESULT=$(snow sql -q "CALL dpplgngr_etl_pipeline('${CONFIG_NAME}');" --format json | jq -r '.[0] | to_entries[0].value')
+    # Compute MD5 hash of the local config file to detect changes
+    LOCAL_CONFIG_HASH=$(cat "$CONFIG_FILE" | jq -cS '.' | md5sum | awk '{print $1}')
+    log_info "Local config hash: $LOCAL_CONFIG_HASH"
     
-    if [[ "$ETL_RESULT" == ERROR:* ]]; then
-        log_error "ETL preprocessing failed:"
-        echo "$ETL_RESULT"
-        exit 1
+    # Check if config has changed and preprocessed table already exists
+    RUN_ETL=true
+    if [ "$FORCE_ETL" = false ]; then
+        # Get the stored hash from Snowflake
+        STORED_HASH=$(snow_sql -q "SELECT config_hash FROM ETL_CONFIGS WHERE config_name = '${CONFIG_NAME}'" --format json 2>/dev/null | jq -r '.[0].CONFIG_HASH // empty' 2>/dev/null || echo "")
+        
+        if [ -n "$STORED_HASH" ] && [ "$STORED_HASH" = "$LOCAL_CONFIG_HASH" ]; then
+            log_info "Config hash matches stored version, checking for existing preprocessed table..."
+            
+            # Get the config 'name' field to determine table name
+            ETL_NAME=$(echo "$CONFIG_JSON" | jq -r '.name')
+            OUTPUT_SCHEMA=$(echo "$CONFIG_JSON" | jq -r '.snowflake_config.output_schema // empty')
+            PREPROCESSED_TABLE_CHECK="${OUTPUT_SCHEMA}.${ETL_NAME}_preprocessed_imputed"
+            
+            # Check if the preprocessed table exists
+            TABLE_EXISTS=$(snow_sql -q "SELECT COUNT(*) AS CNT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '${OUTPUT_SCHEMA}' AND TABLE_NAME = '${ETL_NAME}_PREPROCESSED_IMPUTED'" --format json 2>/dev/null | jq -r '.[0].CNT // "0"' 2>/dev/null || echo "0")
+            
+            if [ "$TABLE_EXISTS" -gt 0 ] 2>/dev/null; then
+                log_success "Config unchanged and preprocessed table '${PREPROCESSED_TABLE_CHECK}' exists — skipping ETL"
+                RUN_ETL=false
+            else
+                log_info "Config unchanged but preprocessed table not found — running ETL"
+            fi
+        else
+            log_info "Config has changed (or no previous hash found) — running ETL"
+        fi
     else
-        log_success "ETL preprocessing completed successfully"
-        echo "$ETL_RESULT"
+        log_info "--force-etl specified — running ETL regardless of config changes"
+    fi
+    
+    if [ "$RUN_ETL" = true ]; then
+        # Call the stored procedure
+        log_info "Calling ETL stored procedure with configuration: $CONFIG_NAME"
+        ETL_RESULT=$(snow_sql -q "CALL dpplgngr_etl_pipeline('${CONFIG_NAME}');" --format json | jq -r '.[0] | to_entries[0].value')
+        
+        if [[ "$ETL_RESULT" == ERROR:* ]]; then
+            log_error "ETL preprocessing failed:"
+            echo "$ETL_RESULT"
+            exit 1
+        else
+            log_success "ETL preprocessing completed successfully"
+            echo "$ETL_RESULT"
+        fi
+        
+        # Update the config hash in Snowflake
+        log_info "Storing config hash..."
+        snow_sql -q "UPDATE ETL_CONFIGS SET config_hash = '${LOCAL_CONFIG_HASH}' WHERE config_name = '${CONFIG_NAME}';" > /dev/null
     fi
 else
     log_warning "Skipping ETL preprocessing step"
@@ -368,7 +444,7 @@ log_info "Downloading from table: $PREPROCESSED_TABLE"
 
 # Download as CSV first, then convert to Parquet
 log_info "Downloading data as CSV..."
-snow sql -q "SELECT * FROM ${PREPROCESSED_TABLE}" --format csv > "${WORK_DIR}/preprocessed_data.csv"
+snow_sql -q "SELECT * FROM ${PREPROCESSED_TABLE}" --format csv > "${WORK_DIR}/preprocessed_data.csv"
 
 log_info "Converting CSV to Parquet..."
 python3 << EOF
@@ -492,7 +568,7 @@ if [ "$SKIP_UPLOAD" = false ]; then
     fi
     
     log_info "Uploading file to Snowflake stage..."
-    snow sql -q "PUT file://${SYNTHETIC_FILE} @~/SYNTHETIC_DATA_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;"
+    snow_sql -q "PUT file://${SYNTHETIC_FILE} @~/SYNTHETIC_DATA_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;"
     
     if [ $? -ne 0 ]; then
         log_error "Failed to upload file to Snowflake stage"
@@ -500,7 +576,7 @@ if [ "$SKIP_UPLOAD" = false ]; then
     fi
     
     log_info "Creating table from staged file..."
-    snow sql -q "
+    snow_sql -q "
 CREATE OR REPLACE TABLE ${OUTPUT_TABLE} 
 USING TEMPLATE (
     SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
@@ -522,7 +598,7 @@ MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;
         log_success "Synthetic data uploaded to table: $OUTPUT_TABLE"
         
         # Get row count
-        ROW_COUNT=$(snow sql -q "SELECT COUNT(*) as CNT FROM ${OUTPUT_TABLE};" --format json | jq -r '.[0].CNT')
+        ROW_COUNT=$(snow_sql -q "SELECT COUNT(*) as CNT FROM ${OUTPUT_TABLE};" --format json | jq -r '.[0].CNT')
         log_info "Table contains $ROW_COUNT rows"
     else
         log_error "Failed to create table from staged file"
