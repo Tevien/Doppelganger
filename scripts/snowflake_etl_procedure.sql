@@ -20,7 +20,7 @@ RETURNS STRING
 LANGUAGE PYTHON
 RUNTIME_VERSION = 3.9
 ARTIFACT_REPOSITORY = snowflake.snowpark.pypi_shared_repository
-PACKAGES = ('dpplgngr==0.4.28', 'dask==2023.10.0', 'dask-ml==2023.3.24', 'dateutils==0.6.12', 'joblib==1.3.1', 'matplotlib==3.7.2', 'numpy==1.25.2', 'pandas==2.2.2', 'polars==1.33.1', 'pyarrow==13.0.0', 'scikit-learn==1.3.0', 'scipy==1.11.1', 'snowflake-snowpark-python')
+PACKAGES = ('dpplgngr==0.4.29', 'dask==2023.10.0', 'dask-ml==2023.3.24', 'dateutils==0.6.12', 'joblib==1.3.1', 'matplotlib==3.7.2', 'numpy==1.25.2', 'pandas==2.2.2', 'polars==1.33.1', 'pyarrow==13.0.0', 'scikit-learn==1.3.0', 'scipy==1.11.1', 'snowflake-snowpark-python')
 HANDLER = 'run_etl_pipeline'
 AS
 $$
