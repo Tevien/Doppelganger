@@ -295,7 +295,7 @@ USING (
         \$1:config_json::VARIANT AS config_json,
         \$1:description::STRING AS description
     FROM @~/CONFIG_STAGE/config_${CONFIG_NAME}.json
-    (FILE_FORMAT => 'TYPE=JSON')
+    (FILE_FORMAT => (TYPE = JSON))
 ) AS source
 ON target.config_name = source.config_name
 WHEN MATCHED THEN
