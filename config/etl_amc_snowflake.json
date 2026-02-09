@@ -6,7 +6,7 @@
     "preprocessing": "/tmp/preprocessing_amc",
 
     "snowflake_config": {
-        "input_schema": "DATATOOLS4HEARTSEAN",
+        "input_schema": "DATATOOLS4HEART",
         "output_schema": "DATATOOLS4HEARTSEAN",
         "database": "HEALTHCARE_DB"
     },
