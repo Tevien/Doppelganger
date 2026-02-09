@@ -134,18 +134,26 @@ JSONEOF
         
         # Upload via stage to handle nested JSON safely
         log_info "Staging configuration file..."
-        snow sql -q "CREATE FILE FORMAT IF NOT EXISTS JSON_CONFIG_FORMAT TYPE = JSON;" > /dev/null
         snow sql -q "PUT file://${TEMP_UPLOAD} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
+        
+        # Load via COPY INTO temp table (inline FILE_FORMAT, no CREATE FILE FORMAT privilege needed)
+        snow sql -q "CREATE TEMPORARY TABLE IF NOT EXISTS ETL_CONFIGS_STAGING (raw VARIANT);" > /dev/null
+        snow sql -q "TRUNCATE TABLE ETL_CONFIGS_STAGING;" > /dev/null
+        snow sql -q "
+            COPY INTO ETL_CONFIGS_STAGING
+            FROM @~/CONFIG_STAGE/config_upload_${CONFIG_NAME}.json
+            FILE_FORMAT = (TYPE = JSON)
+            PURGE = FALSE;
+        " > /dev/null
         
         snow sql -q "
             MERGE INTO ETL_CONFIGS AS target
             USING (
                 SELECT 
-                    \$1:config_name::STRING AS config_name,
-                    \$1:config_json::VARIANT AS config_json,
-                    \$1:description::STRING AS description
-                FROM @~/CONFIG_STAGE/config_upload_${CONFIG_NAME}.json
-                (FILE_FORMAT => 'JSON_CONFIG_FORMAT')
+                    raw:config_name::STRING AS config_name,
+                    raw:config_json::VARIANT AS config_json,
+                    raw:description::STRING AS description
+                FROM ETL_CONFIGS_STAGING
             ) AS source
             ON target.config_name = source.config_name
             WHEN MATCHED THEN
@@ -157,6 +165,8 @@ JSONEOF
                 INSERT (config_name, config_json, description)
                 VALUES (source.config_name, source.config_json, source.description);
         "
+        
+        snow sql -q "DROP TABLE IF EXISTS ETL_CONFIGS_STAGING;" > /dev/null
         
         rm -f "$TEMP_UPLOAD"
         

@@ -286,19 +286,25 @@ JSONEOF
 log_info "Staging configuration file..."
 snow sql -q "PUT file://${CONFIG_STAGE_FILE} @~/CONFIG_STAGE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;" > /dev/null
 
-# Create a named file format for JSON (idempotent)
-snow sql -q "CREATE FILE FORMAT IF NOT EXISTS JSON_CONFIG_FORMAT TYPE = JSON;" > /dev/null
+# Load from stage via COPY INTO temp table (inline FILE_FORMAT, no CREATE FILE FORMAT privilege needed)
+log_info "Loading configuration into Snowflake..."
+snow sql -q "CREATE TEMPORARY TABLE IF NOT EXISTS ETL_CONFIGS_STAGING (raw VARIANT);" > /dev/null
+snow sql -q "TRUNCATE TABLE ETL_CONFIGS_STAGING;" > /dev/null
+snow sql -q "
+COPY INTO ETL_CONFIGS_STAGING
+FROM @~/CONFIG_STAGE/config_${CONFIG_NAME}.json
+FILE_FORMAT = (TYPE = JSON)
+PURGE = FALSE;
+" > /dev/null
 
-# Load from stage into table (handles nested JSON safely)
 snow sql -q "
 MERGE INTO ETL_CONFIGS AS target
 USING (
     SELECT 
-        \$1:config_name::STRING AS config_name,
-        \$1:config_json::VARIANT AS config_json,
-        \$1:description::STRING AS description
-    FROM @~/CONFIG_STAGE/config_${CONFIG_NAME}.json
-    (FILE_FORMAT => 'JSON_CONFIG_FORMAT')
+        raw:config_name::STRING AS config_name,
+        raw:config_json::VARIANT AS config_json,
+        raw:description::STRING AS description
+    FROM ETL_CONFIGS_STAGING
 ) AS source
 ON target.config_name = source.config_name
 WHEN MATCHED THEN
@@ -310,6 +316,8 @@ WHEN NOT MATCHED THEN
     INSERT (config_name, config_json, description)
     VALUES (source.config_name, source.config_json, source.description);
 "
+
+snow sql -q "DROP TABLE IF EXISTS ETL_CONFIGS_STAGING;" > /dev/null
 
 # Clean up staged file
 rm -f "$CONFIG_STAGE_FILE"
