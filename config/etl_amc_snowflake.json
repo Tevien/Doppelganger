@@ -78,10 +78,8 @@
                        "GLUCS;BL": "GLUCOSE",
                        "P_CA_HB": "CALCIUM",
                        "P_CL_HB": "CHLORIDE",
-                       "P_HCT_HB": "HEMATOCRIT",
                        "P_AHCO3_HB": "BICARBONATE",
-                       "P_BE_HB": "BASE_EXCESS",
-                       "DTMP;BL": "TEMPERATURE"
+                       "P_BE_HB": "BASE_EXCESS"
                    }},
                    ["MATERIAALAFNAMEDATUM"]]
     },
@@ -92,7 +90,7 @@
         "BMI", "SYSTOLISCHEBLOEDDRUKWAARDE", "DIASTOLISCHEBLOEDDRUKWAARDE", "BLOEDDRUKGEMIDDELDE", "HARTFREQUENTIE",
         "LICHAAMSGEWICHT", "O2SATURATIE", "ACE", "TIME", "BETA", "CREATININE", "T2DM", "ACUTE_MI", "AF", "HF_FAM",
         "EGFR", "NATRIUM", "KALIUM", "HEMOGLOBIN", "LACTATE", "BICARBONATE", "CHLORIDE", "PCO2", "PH", "GLUCOSE",
-        "CALCIUM", "HEMATOCRIT", "BASE_EXCESS", "TEMPERATURE"],
+        "CALCIUM", "BASE_EXCESS"],
 
     "tuple_vals_after": ["CREATININE",
         "EGFR", "NATRIUM", "KALIUM", "HEMOGLOBIN", "LACTATE", "BICARBONATE", "CHLORIDE", "PCO2", "PH",
