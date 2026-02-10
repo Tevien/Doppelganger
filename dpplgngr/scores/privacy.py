@@ -296,108 +296,101 @@ def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missi
         results['sdmetrics_error'] = str(e)
     
     # ==========================================
-    # 2. PyCanon Privacy Metrics (k-anonymity, l-diversity, t-closeness)
+    # 2. Privacy Metrics (k-anonymity, l-diversity, t-closeness)
+    #    Self-contained implementation using pandas/numpy/scipy
     # ==========================================
     logger.info("="*60)
-    logger.info("PYCANON PRIVACY EVALUATION")
+    logger.info("PRIVACY EVALUATION (k-anonymity, l-diversity, t-closeness)")
     logger.info("="*60)
     
     try:
-        from pycanon import anonymity, report
+        from scipy.stats import wasserstein_distance as _emd
         
-        logger.info("Calculating PyCanon privacy metrics...")
+        logger.info("Calculating privacy metrics...")
         
-        # Prepare data for PyCanon
-        # PyCanon works with pandas DataFrames directly
         # Identify quasi-identifiers (QI) and sensitive attributes
-        numeric_cols = list(original_data.select_dtypes(include=[np.number]).columns)
-        categorical_cols = list(original_data.select_dtypes(include=['object', 'category']).columns)
-        
-        # Select quasi-identifiers (columns that can be used to identify individuals)
-        # Typically: demographics, dates, locations
-        # For this example, we'll use a mix of columns as QI
-        n_qi = min(4, len(original_data.columns) - 1)  # Use up to 4 columns as QI, leave at least one for sensitive
+        n_qi = min(4, len(original_data.columns) - 1)
         quasi_identifiers = list(original_data.columns[:n_qi])
         
-        # Remaining columns are considered sensitive
         sensitive_attrs = [col for col in original_data.columns if col not in quasi_identifiers]
         if not sensitive_attrs:
-            # If all columns are QI, use the last one as sensitive
             sensitive_attrs = [quasi_identifiers.pop()]
         
         logger.info(f"Quasi-identifiers: {quasi_identifiers}")
         logger.info(f"Sensitive attributes: {sensitive_attrs}")
         
-        # K-Anonymity for Original Data
-        try:
-            logger.info("Calculating k-anonymity for original data...")
-            k_anon_original = anonymity.k_anonymity(original_data, quasi_identifiers)
-            results['pycanon_k_anonymity_original'] = int(k_anon_original)
-            logger.info(f"Original Data k-anonymity: {k_anon_original}")
-        except Exception as e:
-            logger.warning(f"k-anonymity calculation for original data failed: {e}")
-            results['pycanon_k_anonymity_original'] = {'error': str(e)}
+        # --- k-Anonymity ---
+        # k = minimum equivalence class size (grouped by QI columns)
+        def _k_anonymity(df, qi_cols):
+            return int(df.groupby(qi_cols, dropna=False).size().min())
         
-        # K-Anonymity for Synthetic Data
-        try:
-            logger.info("Calculating k-anonymity for synthetic data...")
-            k_anon_synthetic = anonymity.k_anonymity(synthetic_data, quasi_identifiers)
-            results['pycanon_k_anonymity_synthetic'] = int(k_anon_synthetic)
-            logger.info(f"Synthetic Data k-anonymity: {k_anon_synthetic}")
-        except Exception as e:
-            logger.warning(f"k-anonymity calculation for synthetic data failed: {e}")
-            results['pycanon_k_anonymity_synthetic'] = {'error': str(e)}
+        for label, df in [('original', original_data), ('synthetic', synthetic_data)]:
+            try:
+                k = _k_anonymity(df, quasi_identifiers)
+                results[f'k_anonymity_{label}'] = k
+                logger.info(f"{label.title()} Data k-anonymity: {k}")
+            except Exception as e:
+                logger.warning(f"k-anonymity for {label} failed: {e}")
+                results[f'k_anonymity_{label}'] = {'error': str(e)}
         
-        # L-Diversity for Original Data
+        # --- l-Diversity ---
+        # l = minimum number of distinct sensitive values across all equivalence classes
+        def _l_diversity(df, qi_cols, sensitive_col):
+            grouped = df.groupby(qi_cols, dropna=False)[sensitive_col]
+            return int(grouped.nunique().min())
+        
         if sensitive_attrs:
-            try:
-                logger.info("Calculating l-diversity for original data...")
-                l_div_original = anonymity.l_diversity(original_data, quasi_identifiers, sensitive_attrs[0])
-                results['pycanon_l_diversity_original'] = int(l_div_original)
-                logger.info(f"Original Data l-diversity: {l_div_original}")
-            except Exception as e:
-                logger.warning(f"l-diversity calculation for original data failed: {e}")
-                results['pycanon_l_diversity_original'] = {'error': str(e)}
-            
-            # L-Diversity for Synthetic Data
-            try:
-                logger.info("Calculating l-diversity for synthetic data...")
-                l_div_synthetic = anonymity.l_diversity(synthetic_data, quasi_identifiers, sensitive_attrs[0])
-                results['pycanon_l_diversity_synthetic'] = int(l_div_synthetic)
-                logger.info(f"Synthetic Data l-diversity: {l_div_synthetic}")
-            except Exception as e:
-                logger.warning(f"l-diversity calculation for synthetic data failed: {e}")
-                results['pycanon_l_diversity_synthetic'] = {'error': str(e)}
+            for label, df in [('original', original_data), ('synthetic', synthetic_data)]:
+                try:
+                    l_val = _l_diversity(df, quasi_identifiers, sensitive_attrs[0])
+                    results[f'l_diversity_{label}'] = l_val
+                    logger.info(f"{label.title()} Data l-diversity: {l_val}")
+                except Exception as e:
+                    logger.warning(f"l-diversity for {label} failed: {e}")
+                    results[f'l_diversity_{label}'] = {'error': str(e)}
         
-        # T-Closeness for Original Data
+        # --- t-Closeness ---
+        # t = max Earth Mover's Distance between the sensitive attribute distribution
+        #     within any equivalence class and the overall distribution
+        def _t_closeness(df, qi_cols, sensitive_col):
+            overall = df[sensitive_col]
+            # For categorical data, convert to numeric codes for EMD
+            if overall.dtype == 'object' or str(overall.dtype) == 'category':
+                codes_map = {v: i for i, v in enumerate(overall.unique())}
+                overall_vals = overall.map(codes_map).values.astype(float)
+                grouped = df.groupby(qi_cols, dropna=False)
+                max_t = 0.0
+                for _, group in grouped:
+                    group_vals = group[sensitive_col].map(codes_map).values.astype(float)
+                    if len(group_vals) > 0:
+                        max_t = max(max_t, _emd(overall_vals, group_vals))
+                return max_t
+            else:
+                overall_vals = overall.dropna().values.astype(float)
+                grouped = df.groupby(qi_cols, dropna=False)
+                max_t = 0.0
+                for _, group in grouped:
+                    group_vals = group[sensitive_col].dropna().values.astype(float)
+                    if len(group_vals) > 0:
+                        max_t = max(max_t, _emd(overall_vals, group_vals))
+                return max_t
+        
         if sensitive_attrs:
-            try:
-                logger.info("Calculating t-closeness for original data...")
-                t_close_original = anonymity.t_closeness(original_data, quasi_identifiers, sensitive_attrs[0])
-                results['pycanon_t_closeness_original'] = float(t_close_original)
-                logger.info(f"Original Data t-closeness: {t_close_original:.4f}")
-            except Exception as e:
-                logger.warning(f"t-closeness calculation for original data failed: {e}")
-                results['pycanon_t_closeness_original'] = {'error': str(e)}
-            
-            # T-Closeness for Synthetic Data
-            try:
-                logger.info("Calculating t-closeness for synthetic data...")
-                t_close_synthetic = anonymity.t_closeness(synthetic_data, quasi_identifiers, sensitive_attrs[0])
-                results['pycanon_t_closeness_synthetic'] = float(t_close_synthetic)
-                logger.info(f"Synthetic Data t-closeness: {t_close_synthetic:.4f}")
-            except Exception as e:
-                logger.warning(f"t-closeness calculation for synthetic data failed: {e}")
-                results['pycanon_t_closeness_synthetic'] = {'error': str(e)}
+            for label, df in [('original', original_data), ('synthetic', synthetic_data)]:
+                try:
+                    t_val = _t_closeness(df, quasi_identifiers, sensitive_attrs[0])
+                    results[f't_closeness_{label}'] = float(t_val)
+                    logger.info(f"{label.title()} Data t-closeness: {t_val:.4f}")
+                except Exception as e:
+                    logger.warning(f"t-closeness for {label} failed: {e}")
+                    results[f't_closeness_{label}'] = {'error': str(e)}
         
-        # Basic Utility Metrics
+        # --- Equivalence class statistics ---
         try:
-            logger.info("Calculating basic disclosure risk...")
-            # Calculate equivalence class sizes for original and synthetic
-            original_ec_sizes = original_data.groupby(quasi_identifiers).size()
-            synthetic_ec_sizes = synthetic_data.groupby(quasi_identifiers).size()
+            original_ec_sizes = original_data.groupby(quasi_identifiers, dropna=False).size()
+            synthetic_ec_sizes = synthetic_data.groupby(quasi_identifiers, dropna=False).size()
             
-            results['pycanon_ec_stats'] = {
+            results['ec_stats'] = {
                 'original_mean_ec_size': float(original_ec_sizes.mean()),
                 'original_min_ec_size': int(original_ec_sizes.min()),
                 'original_max_ec_size': int(original_ec_sizes.max()),
@@ -412,109 +405,112 @@ def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missi
                        f"mean size: {original_ec_sizes.mean():.2f}")
             logger.info(f"Synthetic: {len(synthetic_ec_sizes)} equivalence classes, "
                        f"mean size: {synthetic_ec_sizes.mean():.2f}")
-            
         except Exception as e:
             logger.warning(f"Equivalence class calculation failed: {e}")
-            results['pycanon_ec_stats'] = {'error': str(e)}
+            results['ec_stats'] = {'error': str(e)}
         
-        # Summary Privacy Assessment
+        # --- Summary Privacy Score ---
         try:
             privacy_score = 0
             n_metrics = 0
             
-            if 'pycanon_k_anonymity_synthetic' in results and isinstance(results['pycanon_k_anonymity_synthetic'], int):
-                # Higher k is better (normalize to 0-1, assuming k=10 is excellent)
-                privacy_score += min(results['pycanon_k_anonymity_synthetic'] / 10.0, 1.0)
+            if isinstance(results.get('k_anonymity_synthetic'), int):
+                privacy_score += min(results['k_anonymity_synthetic'] / 10.0, 1.0)
                 n_metrics += 1
             
-            if 'pycanon_l_diversity_synthetic' in results and isinstance(results['pycanon_l_diversity_synthetic'], int):
-                # Higher l is better (normalize to 0-1, assuming l=5 is excellent)
-                privacy_score += min(results['pycanon_l_diversity_synthetic'] / 5.0, 1.0)
+            if isinstance(results.get('l_diversity_synthetic'), int):
+                privacy_score += min(results['l_diversity_synthetic'] / 5.0, 1.0)
                 n_metrics += 1
             
-            if 'pycanon_t_closeness_synthetic' in results and isinstance(results['pycanon_t_closeness_synthetic'], float):
-                # Lower t is better (invert and normalize, assuming t<0.2 is excellent)
-                privacy_score += max(1.0 - results['pycanon_t_closeness_synthetic'] / 0.2, 0.0)
+            if isinstance(results.get('t_closeness_synthetic'), float):
+                privacy_score += max(1.0 - results['t_closeness_synthetic'] / 0.2, 0.0)
                 n_metrics += 1
             
             if n_metrics > 0:
                 avg_privacy_score = privacy_score / n_metrics
-                results['pycanon_privacy_score'] = float(avg_privacy_score)
-                logger.info(f"Overall PyCanon Privacy Score: {avg_privacy_score:.4f} (0=low, 1=high)")
+                results['privacy_score'] = float(avg_privacy_score)
+                logger.info(f"Overall Privacy Score: {avg_privacy_score:.4f} (0=low, 1=high)")
             
         except Exception as e:
             logger.warning(f"Privacy score calculation failed: {e}")
             
     except ImportError as e:
-        logger.warning(f"PyCanon not available: {e}")
-        logger.info("Install with: pip install pycanon")
-        results['pycanon_error'] = str(e)
+        logger.warning(f"scipy not available for privacy metrics: {e}")
+        results['privacy_metrics_error'] = str(e)
+    except Exception as e:
+        logger.warning(f"Privacy metrics calculation failed: {e}")
+        results['privacy_metrics_error'] = str(e)
     
     # ==========================================
-    # 3. Synthpop Distance to Closest Record (DiSCO)
+    # 3. Distance to Closest Record (DCR)
+    #    Self-contained implementation using sklearn NearestNeighbors
     # ==========================================
     logger.info("="*60)
-    logger.info("DISCO (DISTANCE TO CLOSEST RECORD)")
+    logger.info("DCR (DISTANCE TO CLOSEST RECORD)")
     logger.info("="*60)
     
     try:
-        from synthpop import DiSCO
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.neighbors import NearestNeighbors
         
-        logger.info("Calculating DiSCO metric...")
+        logger.info("Calculating DCR metric...")
         
-        # Select numeric columns for distance calculation
         numeric_cols = original_filled.select_dtypes(include=[np.number]).columns
         if len(numeric_cols) > 0:
-            # Data is already filled, no need to fillna again
             original_numeric = original_filled[numeric_cols]
             synthetic_numeric = synthetic_filled[numeric_cols]
             
             # Normalize the data
-            from sklearn.preprocessing import StandardScaler
             scaler = StandardScaler()
             original_scaled = scaler.fit_transform(original_numeric)
             synthetic_scaled = scaler.transform(synthetic_numeric)
             
-            disco_evaluator = DiSCO()
-            disco_results = disco_evaluator.compute(
-                original_scaled,
-                synthetic_scaled
-            )
+            # For each synthetic record, find distance to its nearest original record
+            nn = NearestNeighbors(n_neighbors=1, algorithm='ball_tree', metric='euclidean')
+            nn.fit(original_scaled)
+            distances, _ = nn.kneighbors(synthetic_scaled)
+            dcr_distances = distances.flatten()
             
-            results['disco'] = {
-                'mean_distance': float(np.mean(disco_results)),
-                'median_distance': float(np.median(disco_results)),
-                'min_distance': float(np.min(disco_results)),
-                'max_distance': float(np.max(disco_results)),
-                'std_distance': float(np.std(disco_results))
+            results['dcr'] = {
+                'mean_distance': float(np.mean(dcr_distances)),
+                'median_distance': float(np.median(dcr_distances)),
+                'min_distance': float(np.min(dcr_distances)),
+                'max_distance': float(np.max(dcr_distances)),
+                'std_distance': float(np.std(dcr_distances)),
+                'pct_below_5th_percentile': float(
+                    np.mean(dcr_distances < np.percentile(dcr_distances, 5)) * 100
+                )
             }
             
-            logger.info(f"DiSCO Mean Distance: {results['disco']['mean_distance']:.4f}")
-            logger.info(f"DiSCO Median Distance: {results['disco']['median_distance']:.4f}")
+            logger.info(f"DCR Mean Distance: {results['dcr']['mean_distance']:.4f}")
+            logger.info(f"DCR Median Distance: {results['dcr']['median_distance']:.4f}")
+            logger.info(f"DCR Min Distance: {results['dcr']['min_distance']:.4f}")
             
-            # Plot DiSCO distribution
+            # Plot DCR distribution
             if plots_dir:
                 plt.figure(figsize=(10, 6))
-                plt.hist(disco_results, bins=50, alpha=0.7, color='steelblue', edgecolor='black')
+                plt.hist(dcr_distances, bins=50, alpha=0.7, color='steelblue', edgecolor='black')
                 plt.xlabel('Distance to Closest Record')
                 plt.ylabel('Frequency')
-                plt.title('DiSCO: Distribution of Distances to Closest Original Record')
-                plt.axvline(results['disco']['mean_distance'], color='red', linestyle='--', 
-                           label=f"Mean: {results['disco']['mean_distance']:.4f}")
+                plt.title('DCR: Distribution of Distances to Closest Original Record')
+                plt.axvline(results['dcr']['mean_distance'], color='red', linestyle='--', 
+                           label=f"Mean: {results['dcr']['mean_distance']:.4f}")
+                plt.axvline(results['dcr']['median_distance'], color='orange', linestyle='--',
+                           label=f"Median: {results['dcr']['median_distance']:.4f}")
                 plt.legend()
                 plt.tight_layout()
-                plt.savefig(os.path.join(plots_dir, 'disco_distribution.png'), dpi=300, bbox_inches='tight')
+                plt.savefig(os.path.join(plots_dir, 'dcr_distribution.png'), dpi=300, bbox_inches='tight')
                 plt.close()
         else:
-            logger.info("No numeric columns available for DiSCO calculation")
-            results['disco'] = {'error': 'No numeric columns'}
+            logger.info("No numeric columns available for DCR calculation")
+            results['dcr'] = {'error': 'No numeric columns'}
             
     except ImportError as e:
-        logger.warning(f"Synthpop not available: {e}")
-        results['disco_error'] = str(e)
+        logger.warning(f"sklearn not available for DCR: {e}")
+        results['dcr_error'] = str(e)
     except Exception as e:
-        logger.warning(f"DiSCO calculation failed: {e}")
-        results['disco'] = {'error': str(e)}
+        logger.warning(f"DCR calculation failed: {e}")
+        results['dcr'] = {'error': str(e)}
     
     # ==========================================
     # 4. RepU (Representativeness/Utility)
@@ -739,13 +735,13 @@ def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missi
             if 'sdmetrics_new_row_synthesis' in results and results['sdmetrics_new_row_synthesis']:
                 risk_scores['New Row Synthesis\n(SDMetrics)'] = results['sdmetrics_new_row_synthesis']
             
-            if 'pycanon_privacy_score' in results:
-                risk_scores['Privacy Score\n(PyCanon)'] = results['pycanon_privacy_score']
+            if 'privacy_score' in results:
+                risk_scores['Privacy Score\n(k/l/t)'] = results['privacy_score']
             
-            if 'pycanon_k_anonymity_synthetic' in results and isinstance(results['pycanon_k_anonymity_synthetic'], int):
+            if isinstance(results.get('k_anonymity_synthetic'), int):
                 # Normalize k-anonymity to 0-1 scale (inverse: higher k = lower risk)
-                k_risk = 1.0 - min(results['pycanon_k_anonymity_synthetic'] / 10.0, 1.0)
-                risk_scores['k-Anonymity Risk\n(PyCanon)'] = k_risk
+                k_risk = 1.0 - min(results['k_anonymity_synthetic'] / 10.0, 1.0)
+                risk_scores['k-Anonymity Risk'] = k_risk
             
             if 'membership_inference' in results and 'membership_rate' in results['membership_inference']:
                 risk_scores['Membership\nInference'] = results['membership_inference']['membership_rate']
