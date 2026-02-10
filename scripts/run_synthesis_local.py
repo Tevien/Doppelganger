@@ -139,7 +139,7 @@ def run_synthesis(etl_config_path, gen_config_path, output_dir):
 
 def run_audit(etl_config_path, gen_config_path, output_dir):
     """
-    Run audit evaluation on synthetic data.
+    Run audit evaluation on synthetic data using the full audit pipeline.
     
     Args:
         etl_config_path: Path to ETL configuration
@@ -151,11 +151,15 @@ def run_audit(etl_config_path, gen_config_path, output_dir):
     logger.info("=" * 60)
     
     try:
-        from sdv.evaluation.single_table import evaluate_quality
+        from dpplgngr.scores.audit import audit_synthetic_data
+        from sdv.metadata import SingleTableMetadata
         import pandas as pd
+        import numpy as np
         
-        # Load real and synthetic data
+        # Load configs
         etl_config = load_config(etl_config_path)
+        gen_config = load_config(gen_config_path)
+        
         preprocessed_file = etl_config.get('preprocessed_file',
                                           os.path.join(output_dir, 'preprocessed_data.parquet'))
         synthetic_file = os.path.join(output_dir, 'synthetic_data.parquet')
@@ -172,37 +176,54 @@ def run_audit(etl_config_path, gen_config_path, output_dir):
         synthetic_data = pd.read_parquet(synthetic_file)
         
         # Filter real_data to only the columns in synthetic_data
-        # (the synthetic data was generated from a subset of columns)
         common_cols = [c for c in synthetic_data.columns if c in real_data.columns]
         real_data = real_data[common_cols]
         logger.info(f"Filtered real data to {len(common_cols)} columns matching synthetic data")
         
-        # Create metadata from the filtered real data
-        from sdv.metadata import SingleTableMetadata
+        # Reset indices to avoid duplicate index issues
+        real_data = real_data.reset_index(drop=True)
+        synthetic_data = synthetic_data.reset_index(drop=True)
+        
+        # Handle timedelta columns
+        for col in real_data.columns:
+            if real_data[col].dtype.kind == 'm':
+                real_data[col] = real_data[col].dt.days
+        
+        # Create metadata
         metadata = SingleTableMetadata()
         metadata.detect_from_dataframe(real_data)
         
-        # Evaluate quality
-        logger.info("Evaluating synthetic data quality...")
-        quality_report = evaluate_quality(
-            real_data=real_data,
-            synthetic_data=synthetic_data,
-            metadata=metadata
+        # Create plots directory
+        plots_dir = os.path.join(output_dir, 'audit_plots')
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Run the full audit (distribution plots, correlations, etc.)
+        audit_results = audit_synthetic_data(
+            real_data,
+            synthetic_data,
+            metadata=metadata,
+            plots_dir=plots_dir
         )
         
         # Save results
-        results = {
-            'overall_score': quality_report.get_score(),
-            'properties': quality_report.get_properties(),
-            'details': quality_report.get_details(property_name='Column Shapes').to_dict() if hasattr(quality_report, 'get_details') else {}
-        }
+        results_serializable = {}
+        for key, value in audit_results.items():
+            if isinstance(value, pd.DataFrame):
+                results_serializable[key] = value.to_dict()
+            elif hasattr(value, 'to_dict'):
+                results_serializable[key] = value.to_dict()
+            elif isinstance(value, np.ndarray):
+                results_serializable[key] = value.tolist()
+            else:
+                results_serializable[key] = value
         
         output_file = os.path.join(output_dir, 'audit_results.json')
         with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2, default=str)
+            json.dump(results_serializable, f, indent=2, default=str)
         
         logger.info(f"Audit results saved to: {output_file}")
-        logger.info(f"Overall quality score: {results['overall_score']:.3f}")
+        logger.info(f"Audit plots saved to: {plots_dir}")
+        logger.info(f"Overall quality score: {audit_results.get('quality_score', 'N/A')}")
         
         return True
         
@@ -213,7 +234,7 @@ def run_audit(etl_config_path, gen_config_path, output_dir):
 
 def run_privacy(etl_config_path, gen_config_path, output_dir):
     """
-    Run privacy evaluation on synthetic data.
+    Run privacy evaluation on synthetic data using the full privacy pipeline.
     
     Args:
         etl_config_path: Path to ETL configuration
@@ -225,11 +246,14 @@ def run_privacy(etl_config_path, gen_config_path, output_dir):
     logger.info("=" * 60)
     
     try:
-        from sdv.evaluation.single_table import run_diagnostic
+        from dpplgngr.scores.privacy import evaluate_privacy
         import pandas as pd
+        import numpy as np
         
-        # Load real and synthetic data
+        # Load configs
         etl_config = load_config(etl_config_path)
+        gen_config = load_config(gen_config_path)
+        
         preprocessed_file = etl_config.get('preprocessed_file',
                                           os.path.join(output_dir, 'preprocessed_data.parquet'))
         synthetic_file = os.path.join(output_dir, 'synthetic_data.parquet')
@@ -246,43 +270,41 @@ def run_privacy(etl_config_path, gen_config_path, output_dir):
         synthetic_data = pd.read_parquet(synthetic_file)
         
         # Filter real_data to only the columns in synthetic_data
-        # (the synthetic data was generated from a subset of columns)
         common_cols = [c for c in synthetic_data.columns if c in real_data.columns]
         real_data = real_data[common_cols]
         logger.info(f"Filtered real data to {len(common_cols)} columns matching synthetic data")
         
-        # Create metadata from the filtered real data
-        from sdv.metadata import SingleTableMetadata
-        metadata = SingleTableMetadata()
-        metadata.detect_from_dataframe(real_data)
+        # Reset indices
+        real_data = real_data.reset_index(drop=True)
+        synthetic_data = synthetic_data.reset_index(drop=True)
         
-        # Run diagnostic (includes privacy metrics)
-        logger.info("Running privacy diagnostics...")
-        diagnostic_report = run_diagnostic(
-            real_data=real_data,
-            synthetic_data=synthetic_data,
-            metadata=metadata
+        # Handle timedelta columns
+        for col in real_data.columns:
+            if real_data[col].dtype.kind == 'm':
+                real_data[col] = real_data[col].dt.days
+        
+        # Create plots directory
+        plots_dir = os.path.join(output_dir, 'privacy_plots')
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Run the full privacy evaluation (NewRowSynthesis, k-anonymity,
+        # l-diversity, t-closeness, MIA, attribute disclosure, etc.)
+        privacy_results = evaluate_privacy(
+            real_data,
+            synthetic_data,
+            plots_dir=plots_dir
         )
         
-        # Save results
-        # Note: run_diagnostic valid property names are 'Data Validity' and 'Data Structure'
-        results = {
-            'overall_score': diagnostic_report.get_score(),
-            'properties': diagnostic_report.get_properties(),
-            'details': {}
-        }
-        for prop_name in ['Data Validity', 'Data Structure']:
-            try:
-                results['details'][prop_name] = diagnostic_report.get_details(property_name=prop_name).to_dict()
-            except Exception as detail_err:
-                logger.warning(f"Could not get details for '{prop_name}': {detail_err}")
+        # Save results using the privacy module's serializer
+        from dpplgngr.scores.privacy import _make_serializable
+        results_serializable = _make_serializable(privacy_results)
         
         output_file = os.path.join(output_dir, 'privacy_results.json')
         with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2, default=str)
+            json.dump(results_serializable, f, indent=2, default=str)
         
         logger.info(f"Privacy results saved to: {output_file}")
-        logger.info(f"Overall diagnostic score: {results['overall_score']:.3f}")
+        logger.info(f"Privacy plots saved to: {plots_dir}")
         
         return True
         

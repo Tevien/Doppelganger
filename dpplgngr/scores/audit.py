@@ -282,23 +282,30 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
     # Plot distributions for numeric columns
     if len(numeric_cols) > 0:
         logger.info("Generating numeric distribution plots...")
-        fig, axes = plt.subplots(len(numeric_cols), 2, figsize=(12, 4*len(numeric_cols)))
+        n_cols_plot = min(len(numeric_cols), 4)  # max 4 columns per row
+        n_rows_plot = (len(numeric_cols) + n_cols_plot - 1) // n_cols_plot
+        fig, axes = plt.subplots(n_rows_plot, n_cols_plot, 
+                                figsize=(5*n_cols_plot, 4*n_rows_plot))
         if len(numeric_cols) == 1:
-            axes = axes.reshape(1, -1)
+            axes = np.array([axes])
+        axes = np.atleast_2d(axes)
         
         for i, col in enumerate(numeric_cols):
-            # Original distribution (using filled data)
-            axes[i, 0].hist(original_filled[col], bins=30, alpha=0.7, 
-                           color='skyblue', label='Original')
-            axes[i, 0].set_title(f'{col} - Original Data')
-            axes[i, 0].set_ylabel('Frequency')
-            
-            # Synthetic distribution (using filled data)
-            axes[i, 1].hist(synthetic_filled[col], bins=30, alpha=0.7, 
-                           color='lightcoral', label='Synthetic')
-            axes[i, 1].set_title(f'{col} - Synthetic Data')
-            axes[i, 1].set_ylabel('Frequency')
+            ax = axes[i // n_cols_plot, i % n_cols_plot]
+            # Overlapping distributions with density normalization
+            ax.hist(original_filled[col].dropna(), bins=30, alpha=0.5, 
+                   color='steelblue', label='Original', density=True)
+            ax.hist(synthetic_filled[col].dropna(), bins=30, alpha=0.5, 
+                   color='coral', label='Synthetic', density=True)
+            ax.set_title(col, fontsize=10)
+            ax.set_ylabel('Density')
+            ax.legend(fontsize=8)
         
+        # Hide unused axes
+        for i in range(len(numeric_cols), n_rows_plot * n_cols_plot):
+            axes[i // n_cols_plot, i % n_cols_plot].set_visible(False)
+        
+        plt.suptitle('Distribution Comparison: Original vs Synthetic', fontsize=14, y=1.02)
         plt.tight_layout()
         if plots_dir:
             try:
@@ -315,21 +322,26 @@ def audit_synthetic_data(original_data, synthetic_data, metadata=None, plots_dir
     if len(categorical_cols) > 0:
         logger.info(f"Generating categorical distribution plots for first {min(5, len(categorical_cols))} columns...")
         for col in categorical_cols[:5]:  # Limit to first 5 categorical columns
-            fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+            fig, ax = plt.subplots(figsize=(10, 5))
             
-            # Original distribution (using filled data)
-            original_filled[col].value_counts().plot(kind='bar', ax=axes[0], 
-                                                  color='skyblue', alpha=0.7)
-            axes[0].set_title(f'{col} - Original Data')
-            axes[0].set_ylabel('Count')
-            axes[0].tick_params(axis='x', rotation=45)
+            # Get normalized value counts for both
+            orig_counts = original_filled[col].value_counts(normalize=True).sort_index()
+            synth_counts = synthetic_filled[col].value_counts(normalize=True).sort_index()
             
-            # Synthetic distribution (using filled data)
-            synthetic_filled[col].value_counts().plot(kind='bar', ax=axes[1], 
-                                                   color='lightcoral', alpha=0.7)
-            axes[1].set_title(f'{col} - Synthetic Data')
-            axes[1].set_ylabel('Count')
-            axes[1].tick_params(axis='x', rotation=45)
+            # Align categories
+            all_cats = sorted(set(orig_counts.index) | set(synth_counts.index))
+            orig_vals = [orig_counts.get(c, 0) for c in all_cats]
+            synth_vals = [synth_counts.get(c, 0) for c in all_cats]
+            
+            x = np.arange(len(all_cats))
+            width = 0.35
+            ax.bar(x - width/2, orig_vals, width, alpha=0.7, color='steelblue', label='Original')
+            ax.bar(x + width/2, synth_vals, width, alpha=0.7, color='coral', label='Synthetic')
+            ax.set_xticks(x)
+            ax.set_xticklabels([str(c) for c in all_cats], rotation=45, ha='right')
+            ax.set_title(f'{col} - Distribution Comparison')
+            ax.set_ylabel('Proportion')
+            ax.legend()
             
             plt.tight_layout()
             if plots_dir:
