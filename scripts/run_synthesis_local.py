@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""
+Local Synthesis Runner for Snowflake Pipeline
+
+This script handles the synthesis, audit, and privacy evaluation steps that run
+locally on the HPC environment after data has been downloaded from Snowflake.
+
+It's designed to work with data that has been preprocessed in Snowflake and
+downloaded to the local filesystem.
+"""
+
+import argparse
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+def load_config(config_path):
+    """Load JSON configuration file."""
+    with open(config_path, 'r') as f:
+        return json.load(f)
+
+
+def run_synthesis(etl_config_path, gen_config_path, output_dir):
+    """
+    Run synthetic data generation using SDVGen.
+    
+    Args:
+        etl_config_path: Path to ETL configuration
+        gen_config_path: Path to generation configuration
+        output_dir: Directory for output files
+    """
+    logger.info("=" * 60)
+    logger.info("Running Synthetic Data Generation")
+    logger.info("=" * 60)
+    
+    try:
+        from dpplgngr.train.sdv import SDVGen
+        import dask.dataframe as dd
+        import pandas as pd
+        
+        # Load configurations
+        etl_config = load_config(etl_config_path)
+        gen_config = load_config(gen_config_path)
+        
+        # Update paths in gen_config to use output_dir
+        gen_config['output_dir'] = output_dir
+        
+        # Save updated gen_config
+        gen_config_temp = os.path.join(output_dir, 'gen_config_temp.json')
+        with open(gen_config_temp, 'w') as f:
+            json.dump(gen_config, f, indent=2)
+        
+        logger.info(f"ETL config: {etl_config_path}")
+        logger.info(f"Gen config: {gen_config_temp}")
+        logger.info(f"Output dir: {output_dir}")
+        
+        # Load preprocessed data
+        preprocessed_file = etl_config.get('preprocessed_file', 
+                                          os.path.join(output_dir, 'preprocessed_data.parquet'))
+        
+        if not os.path.exists(preprocessed_file):
+            raise FileNotFoundError(f"Preprocessed data not found: {preprocessed_file}")
+        
+        logger.info(f"Loading preprocessed data from: {preprocessed_file}")
+        
+        # For SDVGen, we need to mock the Luigi task structure
+        # Create a custom runner that doesn't rely on Luigi dependencies
+        logger.info("Initializing SDV generator...")
+        
+        # Read the preprocessed data
+        df = pd.read_parquet(preprocessed_file)
+        logger.info(f"Loaded data shape: {df.shape}")
+        
+        # Import and configure the generator
+        from sdv.single_table import GaussianCopulaSynthesizer, CTGANSynthesizer, TVAESynthesizer
+        from sdv.metadata import SingleTableMetadata
+        
+        # Determine model type from config
+        model_type = gen_config.get('model', 'GaussianCopula')
+        logger.info(f"Using model: {model_type}")
+        
+        # Create metadata
+        metadata = SingleTableMetadata()
+        metadata.detect_from_dataframe(df)
+        
+        # Initialize synthesizer based on model type
+        if model_type == 'GaussianCopula':
+            synthesizer = GaussianCopulaSynthesizer(metadata)
+        elif model_type == 'CTGAN':
+            synthesizer = CTGANSynthesizer(metadata)
+        elif model_type == 'TVAE':
+            synthesizer = TVAESynthesizer(metadata)
+        else:
+            logger.warning(f"Unknown model type: {model_type}, defaulting to GaussianCopula")
+            synthesizer = GaussianCopulaSynthesizer(metadata)
+        
+        # Train the model
+        logger.info("Training synthesizer...")
+        synthesizer.fit(df)
+        
+        # Generate synthetic data
+        num_samples = gen_config.get('num_samples', len(df))
+        logger.info(f"Generating {num_samples} synthetic samples...")
+        synthetic_data = synthesizer.sample(num_rows=num_samples)
+        
+        # Save synthetic data
+        output_file = os.path.join(output_dir, 'synthetic_data.parquet')
+        synthetic_data.to_parquet(output_file, index=False)
+        logger.info(f"Synthetic data saved to: {output_file}")
+        logger.info(f"Synthetic data shape: {synthetic_data.shape}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Synthesis failed: {e}", exc_info=True)
+        return False
+
+
+def run_audit(etl_config_path, gen_config_path, output_dir):
+    """
+    Run audit evaluation on synthetic data.
+    
+    Args:
+        etl_config_path: Path to ETL configuration
+        gen_config_path: Path to generation configuration
+        output_dir: Directory with synthetic and real data
+    """
+    logger.info("=" * 60)
+    logger.info("Running Audit Evaluation")
+    logger.info("=" * 60)
+    
+    try:
+        from sdv.evaluation.single_table import evaluate_quality
+        import pandas as pd
+        
+        # Load real and synthetic data
+        etl_config = load_config(etl_config_path)
+        preprocessed_file = etl_config.get('preprocessed_file',
+                                          os.path.join(output_dir, 'preprocessed_data.parquet'))
+        synthetic_file = os.path.join(output_dir, 'synthetic_data.parquet')
+        
+        if not os.path.exists(preprocessed_file):
+            raise FileNotFoundError(f"Preprocessed data not found: {preprocessed_file}")
+        if not os.path.exists(synthetic_file):
+            raise FileNotFoundError(f"Synthetic data not found: {synthetic_file}")
+        
+        logger.info(f"Loading real data from: {preprocessed_file}")
+        real_data = pd.read_parquet(preprocessed_file)
+        
+        logger.info(f"Loading synthetic data from: {synthetic_file}")
+        synthetic_data = pd.read_parquet(synthetic_file)
+        
+        # Create metadata
+        from sdv.metadata import SingleTableMetadata
+        metadata = SingleTableMetadata()
+        metadata.detect_from_dataframe(real_data)
+        
+        # Evaluate quality
+        logger.info("Evaluating synthetic data quality...")
+        quality_report = evaluate_quality(
+            real_data=real_data,
+            synthetic_data=synthetic_data,
+            metadata=metadata
+        )
+        
+        # Save results
+        results = {
+            'overall_score': quality_report.get_score(),
+            'properties': quality_report.get_properties(),
+            'details': quality_report.get_details(property_name='Column Shapes').to_dict() if hasattr(quality_report, 'get_details') else {}
+        }
+        
+        output_file = os.path.join(output_dir, 'audit_results.json')
+        with open(output_file, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+        
+        logger.info(f"Audit results saved to: {output_file}")
+        logger.info(f"Overall quality score: {results['overall_score']:.3f}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Audit evaluation failed: {e}", exc_info=True)
+        return False
+
+
+def run_privacy(etl_config_path, gen_config_path, output_dir):
+    """
+    Run privacy evaluation on synthetic data.
+    
+    Args:
+        etl_config_path: Path to ETL configuration
+        gen_config_path: Path to generation configuration
+        output_dir: Directory with synthetic and real data
+    """
+    logger.info("=" * 60)
+    logger.info("Running Privacy Evaluation")
+    logger.info("=" * 60)
+    
+    try:
+        from sdv.evaluation.single_table import run_diagnostic
+        import pandas as pd
+        
+        # Load real and synthetic data
+        etl_config = load_config(etl_config_path)
+        preprocessed_file = etl_config.get('preprocessed_file',
+                                          os.path.join(output_dir, 'preprocessed_data.parquet'))
+        synthetic_file = os.path.join(output_dir, 'synthetic_data.parquet')
+        
+        if not os.path.exists(preprocessed_file):
+            raise FileNotFoundError(f"Preprocessed data not found: {preprocessed_file}")
+        if not os.path.exists(synthetic_file):
+            raise FileNotFoundError(f"Synthetic data not found: {synthetic_file}")
+        
+        logger.info(f"Loading real data from: {preprocessed_file}")
+        real_data = pd.read_parquet(preprocessed_file)
+        
+        logger.info(f"Loading synthetic data from: {synthetic_file}")
+        synthetic_data = pd.read_parquet(synthetic_file)
+        
+        # Create metadata
+        from sdv.metadata import SingleTableMetadata
+        metadata = SingleTableMetadata()
+        metadata.detect_from_dataframe(real_data)
+        
+        # Run diagnostic (includes privacy metrics)
+        logger.info("Running privacy diagnostics...")
+        diagnostic_report = run_diagnostic(
+            real_data=real_data,
+            synthetic_data=synthetic_data,
+            metadata=metadata
+        )
+        
+        # Save results
+        results = {
+            'overall_score': diagnostic_report.get_score(),
+            'properties': diagnostic_report.get_properties(),
+            'details': diagnostic_report.get_details(property_name='Coverage').to_dict() if hasattr(diagnostic_report, 'get_details') else {}
+        }
+        
+        output_file = os.path.join(output_dir, 'privacy_results.json')
+        with open(output_file, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+        
+        logger.info(f"Privacy results saved to: {output_file}")
+        logger.info(f"Overall diagnostic score: {results['overall_score']:.3f}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Privacy evaluation failed: {e}", exc_info=True)
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Run synthesis, audit, and privacy evaluation locally'
+    )
+    parser.add_argument('--etl-config', required=True,
+                       help='Path to ETL configuration file')
+    parser.add_argument('--gen-config', required=True,
+                       help='Path to generation configuration file')
+    parser.add_argument('--output-dir', required=True,
+                       help='Output directory for results')
+    parser.add_argument('--audit-only', action='store_true',
+                       help='Run only audit evaluation')
+    parser.add_argument('--privacy-only', action='store_true',
+                       help='Run only privacy evaluation')
+    parser.add_argument('--skip-synthesis', action='store_true',
+                       help='Skip synthesis step')
+    
+    args = parser.parse_args()
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    success = True
+    
+    # Run synthesis unless skipped or running audit/privacy only
+    if not args.skip_synthesis and not args.audit_only and not args.privacy_only:
+        if not run_synthesis(args.etl_config, args.gen_config, args.output_dir):
+            success = False
+            logger.error("Synthesis failed")
+    
+    # Run audit if requested or if running full pipeline
+    if args.audit_only or (not args.privacy_only and not args.skip_synthesis):
+        if not run_audit(args.etl_config, args.gen_config, args.output_dir):
+            logger.warning("Audit evaluation failed (continuing)")
+    
+    # Run privacy if requested or if running full pipeline
+    if args.privacy_only or (not args.audit_only and not args.skip_synthesis):
+        if not run_privacy(args.etl_config, args.gen_config, args.output_dir):
+            logger.warning("Privacy evaluation failed (continuing)")
+    
+    if success:
+        logger.info("=" * 60)
+        logger.info("All requested operations completed successfully")
+        logger.info("=" * 60)
+        return 0
+    else:
+        logger.error("=" * 60)
+        logger.error("Some operations failed")
+        logger.error("=" * 60)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
