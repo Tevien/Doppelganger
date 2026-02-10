@@ -119,7 +119,7 @@ def run_etl_pipeline(session, config_name):
                 snowpark_session=session           
             )
             imputer.run()
-            final_table = f"{output_schema}.{etl_config['name']}_preprocessed_imputed"
+            final_table = f"{output_schema}.{etl_config['name']}_preprocessed_fillnan"
             
             return f"SUCCESS: ETL pipeline completed for configuration '{config_name}'! Database: {current_db}, Schema: {current_schema}. Reading from: {', '.join(table_info)}. Output tables: {preprocessed_table}, {tupleprocessed_table}, {final_table}"
         
