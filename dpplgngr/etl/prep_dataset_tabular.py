@@ -283,6 +283,25 @@ class PreProcess(luigi.Task):
                     data_configs[key] = value
             return data_configs, None
     
+    def drop_helper_columns(self, df, input_json):
+        """
+        Drop columns that are not needed in the final output or downstream processing.
+        These 'helper' columns (e.g. PATIENTCONTACTID used only for sort/dedup) can cause
+        many-to-many joins if they remain during merges.
+        """
+        keep_cols = set(input_json.get('final_cols', []))
+        keep_cols.update(input_json.get('tuple_vals_after', []))
+        keep_cols.update(input_json.get('tuple_vals_anybefore', []))
+        ref_date = input_json.get('ref_date', None)
+        if ref_date:
+            keep_cols.add(ref_date)
+
+        cols_to_drop = [c for c in df.columns if c not in keep_cols]
+        if cols_to_drop:
+            logging.info(f"Dropping helper columns before merge: {cols_to_drop}")
+            df = df.drop(columns=cols_to_drop)
+        return df
+
     def apply_transformations(self, s_df, _config, total_cols, transform_type="PreTransforms"):
         # See if any column names specify aggregations
         aggs = _config.get(transform_type, None)
@@ -356,6 +375,9 @@ class PreProcess(luigi.Task):
                     elif df.index.name is None and index in df.columns:
                         df = df.set_index(index)
                     
+                    # Drop helper columns that may have been saved before the fix
+                    df = self.drop_helper_columns(df, input_json)
+
                     # Log merge information for debugging
                     logging.info(f"Before merge (existing table) - df index name: {df.index.name}, df_pp index name: {df_pp.index.name if df_pp is not None else 'None'}")
                     logging.info(f"df shape: {df.shape}, df_pp shape: {df_pp.shape if df_pp is not None else 'None'}")
@@ -414,9 +436,18 @@ class PreProcess(luigi.Task):
                 elif df.index.name is None and index in df.columns:
                     df = df.set_index(index)
                 
-                assert df.index.unique, "Index is not unique"
-                
                 df = self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
+
+                # Drop helper columns (e.g. PATIENTCONTACTID) that are not needed
+                # in the final output — keeping them causes many-to-many joins
+                df = self.drop_helper_columns(df, input_json)
+
+                # Validate index uniqueness (is_unique, not .unique which is always truthy)
+                try:
+                    assert df.index.is_unique, f"Index is not unique for table {table_name}"
+                except AssertionError:
+                    logging.warning(f"Non-unique index detected for {table_name}, deduplicating...")
+                    df = df[~df.index.duplicated(keep='first')]
                 
                 # Write individual preprocessed table to Snowflake for future use
                 self.write_individual_preprocessed_table(session, df, output_schema, individual_table_name)
@@ -464,6 +495,8 @@ class PreProcess(luigi.Task):
                 if os.path.exists(saved_loc):
                     logging.info(f"*** Loading {saved_loc} ***")
                     df = dd.read_parquet(saved_loc, npartitions=3)
+                    # Drop helper columns that may have been saved before the fix
+                    df = self.drop_helper_columns(df, input_json)
                     df_pp, pa_schema = safe_merge(df, df_pp)
                     continue
 
@@ -506,9 +539,18 @@ class PreProcess(luigi.Task):
                     df = vals_to_cols(df, index_col=index, code_col=col_name, value_col=val_name,
                     code_map=col_map, extra_cols=extra_cols)
                 
-                assert df.index.unique, "Index is not unique"
-
                 df = self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
+
+                # Drop helper columns (e.g. PATIENTCONTACTID) that are not needed
+                # in the final output — keeping them causes many-to-many joins
+                df = self.drop_helper_columns(df, input_json)
+
+                # Validate index uniqueness (is_unique, not .unique which is always truthy)
+                try:
+                    assert df.index.is_unique, "Index is not unique"
+                except AssertionError:
+                    logging.warning(f"Non-unique index detected, deduplicating...")
+                    df = df[~df.index.duplicated(keep='first')]
 
                 # Checkpoint pre-concat only if not using SNOWFLAKE
                 if input_json.get("SOURCE", "FILE") != "SNOWFLAKE":

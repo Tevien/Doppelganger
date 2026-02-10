@@ -169,11 +169,16 @@ def safe_merge(_df, _df_pp):
     Safely merge dataframes, handling data type inconsistencies that may occur
     after saving/loading from Parquet files.
     """
-    # Remove specific columns that might cause issues
-    if "Patientcontactid" in _df.columns:
-        _df = _df.drop(columns=["Patientcontactid"])
-    if "PatientContactId" in _df.columns:
-        _df = _df.drop(columns=["PatientContactId"])
+    # Remove PATIENTCONTACTID columns (case-insensitive) that cause many-to-many joins
+    for _target_df in [_df, _df_pp]:
+        if _target_df is None:
+            continue
+        cols_to_drop = [c for c in _target_df.columns if c.lower() == 'patientcontactid']
+        if cols_to_drop:
+            if _target_df is _df:
+                _df = _df.drop(columns=cols_to_drop)
+            else:
+                _df_pp = _df_pp.drop(columns=cols_to_drop)
 
     logging.info("df_pp premerge")
     if _df_pp is not None:
@@ -198,17 +203,21 @@ def safe_merge(_df, _df_pp):
             # Find common columns for merging
             common_cols = list(set(get_index_names(_df_pp_std)) & set(get_index_names(_df_std)))
 
-            if not common_cols and _df_pp_std.index.name and _df_std.index.name:
-                # Both have index names, use them
+            if common_cols:
+                # Both have matching index names - merge on index explicitly
+                # This avoids accidentally joining on other common columns (e.g. PATIENTCONTACTID)
+                logging.info(f"Merging on common index: {common_cols}")
+                _df_pp = _df_pp_std.merge(_df_std, how="left", left_index=True, right_index=True)
+            elif _df_pp_std.index.name and _df_std.index.name:
                 if _df_pp_std.index.name == _df_std.index.name:
                     _df_pp = _df_pp_std.merge(_df_std, how="left", left_index=True, right_index=True)
                 else:
                     # Index names don't match, reset and merge on common columns
                     _df_pp_reset = _df_pp_std.reset_index()
                     _df_reset = _df_std.reset_index()
-                    common_cols = list(set(_df_pp_reset.columns) & set(_df_reset.columns))
-                    if common_cols:
-                        _df_pp = _df_pp_reset.merge(_df_reset, how="left", on=common_cols)
+                    common_reset_cols = list(set(_df_pp_reset.columns) & set(_df_reset.columns))
+                    if common_reset_cols:
+                        _df_pp = _df_pp_reset.merge(_df_reset, how="left", on=common_reset_cols)
                         # Try to restore index if possible
                         index_col = _df_pp_std.index.name or _df_std.index.name
                         if index_col in _df_pp.columns:
@@ -216,7 +225,8 @@ def safe_merge(_df, _df_pp):
                     else:
                         _df_pp = _df_pp_std.merge(_df_std, how="left")
             else:
-                # Standard merge
+                # No common index, fall back to standard merge
+                logging.warning("No common index found, falling back to standard merge on common columns")
                 _df_pp = _df_pp_std.merge(_df_std, how="left")
                 
         except Exception as e:
