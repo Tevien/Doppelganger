@@ -171,7 +171,13 @@ def run_audit(etl_config_path, gen_config_path, output_dir):
         logger.info(f"Loading synthetic data from: {synthetic_file}")
         synthetic_data = pd.read_parquet(synthetic_file)
         
-        # Create metadata
+        # Filter real_data to only the columns in synthetic_data
+        # (the synthetic data was generated from a subset of columns)
+        common_cols = [c for c in synthetic_data.columns if c in real_data.columns]
+        real_data = real_data[common_cols]
+        logger.info(f"Filtered real data to {len(common_cols)} columns matching synthetic data")
+        
+        # Create metadata from the filtered real data
         from sdv.metadata import SingleTableMetadata
         metadata = SingleTableMetadata()
         metadata.detect_from_dataframe(real_data)
@@ -239,7 +245,13 @@ def run_privacy(etl_config_path, gen_config_path, output_dir):
         logger.info(f"Loading synthetic data from: {synthetic_file}")
         synthetic_data = pd.read_parquet(synthetic_file)
         
-        # Create metadata
+        # Filter real_data to only the columns in synthetic_data
+        # (the synthetic data was generated from a subset of columns)
+        common_cols = [c for c in synthetic_data.columns if c in real_data.columns]
+        real_data = real_data[common_cols]
+        logger.info(f"Filtered real data to {len(common_cols)} columns matching synthetic data")
+        
+        # Create metadata from the filtered real data
         from sdv.metadata import SingleTableMetadata
         metadata = SingleTableMetadata()
         metadata.detect_from_dataframe(real_data)
@@ -303,19 +315,24 @@ def main():
     
     success = True
     
-    # Run synthesis unless skipped or running audit/privacy only
-    if not args.skip_synthesis and not args.audit_only and not args.privacy_only:
+    # Determine which steps to run:
+    # --audit-only  -> only audit
+    # --privacy-only -> only privacy
+    # neither       -> synthesis + audit + privacy (unless --skip-synthesis)
+    run_synth = not args.skip_synthesis and not args.audit_only and not args.privacy_only
+    run_audit_step = args.audit_only or (not args.audit_only and not args.privacy_only)
+    run_privacy_step = args.privacy_only or (not args.audit_only and not args.privacy_only)
+    
+    if run_synth:
         if not run_synthesis(args.etl_config, args.gen_config, args.output_dir):
             success = False
             logger.error("Synthesis failed")
     
-    # Run audit if requested or if running full pipeline
-    if args.audit_only or (not args.privacy_only and not args.skip_synthesis):
+    if run_audit_step:
         if not run_audit(args.etl_config, args.gen_config, args.output_dir):
             logger.warning("Audit evaluation failed (continuing)")
     
-    # Run privacy if requested or if running full pipeline
-    if args.privacy_only or (not args.audit_only and not args.skip_synthesis):
+    if run_privacy_step:
         if not run_privacy(args.etl_config, args.gen_config, args.output_dir):
             logger.warning("Privacy evaluation failed (continuing)")
     

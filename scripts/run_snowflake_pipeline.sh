@@ -577,13 +577,15 @@ if [ "$SKIP_UPLOAD" = false ]; then
     
     log_info "Creating table from staged file..."
     snow_sql -q "
+CREATE FILE FORMAT IF NOT EXISTS DPPLGNGR_PARQUET_FORMAT TYPE = PARQUET;
+
 CREATE OR REPLACE TABLE ${OUTPUT_TABLE} 
 USING TEMPLATE (
     SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
     FROM TABLE(
         INFER_SCHEMA(
             LOCATION=>'@~/SYNTHETIC_DATA_STAGE/',
-            FILE_FORMAT=>'(TYPE=PARQUET)'
+            FILE_FORMAT=>'DPPLGNGR_PARQUET_FORMAT'
         )
     )
 );
