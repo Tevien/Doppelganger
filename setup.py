@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 setup(
     name='dpplgngr',
     packages=find_packages(),
-    version='0.4.28',
+    version='0.4.30',
     description='Deep-learning automated twinning',
     author='Sean Benson',
     license='MIT',
