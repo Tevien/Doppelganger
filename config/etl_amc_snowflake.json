@@ -1,5 +1,5 @@
 {
-    "name": "amc_process",
+    "name": "etl_amc_snowflake",
     "description": "Preprocessing of AMC data (Snowflake equivalent of etl_amc_hpc_snowflake_equiv)",
     "SOURCE": "SNOWFLAKE",
 
