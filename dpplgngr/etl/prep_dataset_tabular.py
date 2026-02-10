@@ -296,6 +296,22 @@ class PreProcess(luigi.Task):
         if ref_date:
             keep_cols.add(ref_date)
 
+        # Also keep columns referenced by MergedTransforms (e.g. GEBOORTEJAAR
+        # used to compute AGEATOPNAME via diff, or OVERLIJDENSDATUM for TIME)
+        for transform_type in ('MergedTransforms', 'PreTransforms', 'InitTransforms'):
+            transforms = input_json.get(transform_type, {})
+            for _t_name, t_conf in transforms.items():
+                keep_cols.add(_t_name)
+                if isinstance(t_conf, dict):
+                    kwargs = t_conf.get('kwargs', {})
+                    for v in kwargs.values():
+                        if isinstance(v, str):
+                            keep_cols.add(v)
+
+        # Preserve the index column
+        if df.index.name:
+            keep_cols.add(df.index.name)
+
         cols_to_drop = [c for c in df.columns if c not in keep_cols]
         if cols_to_drop:
             logging.info(f"Dropping helper columns before merge: {cols_to_drop}")
