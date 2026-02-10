@@ -439,7 +439,7 @@ log_info "Step 3: Downloading preprocessed data"
 log_info "========================================="
 
 # Determine the table name based on configuration
-PREPROCESSED_TABLE="${CONFIG_NAME}_preprocessed_fillnan"
+PREPROCESSED_TABLE="${CONFIG_NAME}_fillnan"
 log_info "Downloading from table: $PREPROCESSED_TABLE"
 
 # Download as CSV first, then convert to Parquet
