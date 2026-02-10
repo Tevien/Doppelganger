@@ -81,6 +81,17 @@ def run_synthesis(etl_config_path, gen_config_path, output_dir):
         df = pd.read_parquet(preprocessed_file)
         logger.info(f"Loaded data shape: {df.shape}")
         
+        # Filter to only the columns specified in gen_config
+        gen_columns = gen_config.get('columns', None)
+        if gen_columns:
+            missing_cols = [c for c in gen_columns if c not in df.columns]
+            if missing_cols:
+                logger.warning(f"Columns in gen_config not found in data: {missing_cols}")
+            available_cols = [c for c in gen_columns if c in df.columns]
+            df = df[available_cols]
+            logger.info(f"Filtered to {len(available_cols)} columns from gen_config")
+        logger.info(f"Data shape for synthesis: {df.shape}")
+        
         # Import and configure the generator
         from sdv.single_table import GaussianCopulaSynthesizer, CTGANSynthesizer, TVAESynthesizer
         from sdv.metadata import SingleTableMetadata
@@ -242,11 +253,17 @@ def run_privacy(etl_config_path, gen_config_path, output_dir):
         )
         
         # Save results
+        # Note: run_diagnostic valid property names are 'Data Validity' and 'Data Structure'
         results = {
             'overall_score': diagnostic_report.get_score(),
             'properties': diagnostic_report.get_properties(),
-            'details': diagnostic_report.get_details(property_name='Coverage').to_dict() if hasattr(diagnostic_report, 'get_details') else {}
+            'details': {}
         }
+        for prop_name in ['Data Validity', 'Data Structure']:
+            try:
+                results['details'][prop_name] = diagnostic_report.get_details(property_name=prop_name).to_dict()
+            except Exception as detail_err:
+                logger.warning(f"Could not get details for '{prop_name}': {detail_err}")
         
         output_file = os.path.join(output_dir, 'privacy_results.json')
         with open(output_file, 'w') as f:

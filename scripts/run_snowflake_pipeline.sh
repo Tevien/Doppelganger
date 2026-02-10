@@ -583,7 +583,7 @@ USING TEMPLATE (
     FROM TABLE(
         INFER_SCHEMA(
             LOCATION=>'@~/SYNTHETIC_DATA_STAGE/',
-            FILE_FORMAT=>'PARQUET_FORMAT'
+            FILE_FORMAT=>'(TYPE=PARQUET)'
         )
     )
 );
