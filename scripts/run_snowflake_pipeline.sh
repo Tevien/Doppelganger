@@ -576,19 +576,43 @@ if [ "$SKIP_UPLOAD" = false ]; then
     fi
     
     log_info "Creating table from staged file..."
-    snow_sql -q "
-CREATE FILE FORMAT IF NOT EXISTS DPPLGNGR_PARQUET_FORMAT TYPE = PARQUET;
 
-CREATE OR REPLACE TABLE ${OUTPUT_TABLE} 
-USING TEMPLATE (
-    SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
-    FROM TABLE(
-        INFER_SCHEMA(
-            LOCATION=>'@~/SYNTHETIC_DATA_STAGE/',
-            FILE_FORMAT=>'DPPLGNGR_PARQUET_FORMAT'
-        )
+    # Build CREATE TABLE from parquet schema using Python (avoids needing
+    # CREATE FILE FORMAT privileges required by INFER_SCHEMA)
+    log_info "Reading parquet schema to build table DDL..."
+    TABLE_DDL=$(python3 << PYEOF
+import pyarrow.parquet as pq
+import sys
+
+try:
+    schema = pq.read_schema('${SYNTHETIC_FILE}')
+    # Map Arrow types to Snowflake types
+    type_map = {
+        'int8': 'NUMBER', 'int16': 'NUMBER', 'int32': 'NUMBER', 'int64': 'NUMBER',
+        'uint8': 'NUMBER', 'uint16': 'NUMBER', 'uint32': 'NUMBER', 'uint64': 'NUMBER',
+        'float': 'FLOAT', 'double': 'DOUBLE', 'float16': 'FLOAT', 'float32': 'FLOAT', 'float64': 'DOUBLE',
+        'bool': 'BOOLEAN', 'string': 'VARCHAR', 'large_string': 'VARCHAR',
+        'date32[day]': 'DATE', 'timestamp[ns]': 'TIMESTAMP_NTZ', 'timestamp[us]': 'TIMESTAMP_NTZ',
+        'timestamp[ms]': 'TIMESTAMP_NTZ', 'timestamp[s]': 'TIMESTAMP_NTZ',
+    }
+    cols = []
+    for field in schema:
+        sf_type = type_map.get(str(field.type), 'VARCHAR')
+        cols.append(f'"{field.name}" {sf_type}')
+    print(', '.join(cols))
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
     )
-);
+
+    if [ $? -ne 0 ] || [ -z "$TABLE_DDL" ]; then
+        log_error "Failed to read parquet schema"
+        exit 1
+    fi
+
+    snow_sql -q "
+CREATE OR REPLACE TABLE ${OUTPUT_TABLE} (${TABLE_DDL});
 
 COPY INTO ${OUTPUT_TABLE}
 FROM @~/SYNTHETIC_DATA_STAGE/
