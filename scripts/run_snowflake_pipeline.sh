@@ -225,6 +225,9 @@ fi
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 
+# Temporary ETL config used by synthesis, audit, and privacy steps
+ETL_CONFIG_TEMP="${WORK_DIR}/etl_config_temp.json"
+
 # Build warehouse flag for snow sql commands
 WAREHOUSE_FLAG=""
 if [ -n "$WAREHOUSE" ]; then
@@ -473,19 +476,20 @@ fi
 ################################################################################
 # Step 4: Run Synthetic Data Generation
 ################################################################################
-if [ "$SKIP_SYNTHESIS" = false ]; then
-    log_info ""
-    log_info "========================================="
-    log_info "Step 4: Running synthetic data generation"
-    log_info "========================================="    # Create temporary ETL config for synthesis step
-    ETL_CONFIG_TEMP="${WORK_DIR}/etl_config_temp.json"
-    cat > "$ETL_CONFIG_TEMP" << EOF
+# Write temporary ETL config (needed by synthesis, audit, and privacy steps)
+cat > "$ETL_CONFIG_TEMP" << EOF
 {
     "name": "${CONFIG_NAME}",
     "preprocessing": "${WORK_DIR}",
     "preprocessed_file": "${WORK_DIR}/preprocessed_data.parquet"
 }
 EOF
+
+if [ "$SKIP_SYNTHESIS" = false ]; then
+    log_info ""
+    log_info "========================================="
+    log_info "Step 4: Running synthetic data generation"
+    log_info "========================================="
     
     log_info "Running synthesis with config: $GEN_CONFIG"
     python3 "${SCRIPT_DIR}/run_synthesis_local.py" \
