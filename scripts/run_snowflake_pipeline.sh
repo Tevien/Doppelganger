@@ -510,11 +510,14 @@ if [ "$SKIP_SYNTHESIS" = false ]; then
         ############################################################################
         log_info "Using Snowflake GENERATE_SYNTHETIC_DATA method"
 
-        # Resolve the fully-qualified input table name (ETL fillnan output)
-        SF_INPUT_TABLE="${PREPROCESSED_TABLE}"
+        # Resolve current database and schema from the Snowflake connection
+        SF_CURRENT_DB=$(snow_sql -q "SELECT CURRENT_DATABASE() AS DB" --format json | jq -r '.[0].DB')
+        SF_CURRENT_SCHEMA=$(snow_sql -q "SELECT CURRENT_SCHEMA() AS SCH" --format json | jq -r '.[0].SCH')
+        log_info "Snowflake context: database=${SF_CURRENT_DB}, schema=${SF_CURRENT_SCHEMA}"
 
-        # Output table for the Snowflake-generated synthetic data
-        SF_SYNTH_OUTPUT_TABLE="${OUTPUT_TABLE}"
+        # Build fully-qualified table names (<database>.<schema>.<table>)
+        SF_INPUT_TABLE="${SF_CURRENT_DB}.${SF_CURRENT_SCHEMA}.${PREPROCESSED_TABLE}"
+        SF_SYNTH_OUTPUT_TABLE="${SF_CURRENT_DB}.${SF_CURRENT_SCHEMA}.${OUTPUT_TABLE}"
 
         # Build the columns spec from the synth config JSON
         log_info "Reading columns from synth config: $GEN_CONFIG"
