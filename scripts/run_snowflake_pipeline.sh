@@ -32,6 +32,7 @@
 #   --output-table <name>         Name for output table in Snowflake (default: <config_name>_SYNTHETIC_DATA)
 #   --warehouse <name>            Snowflake warehouse to use (default: connection default)
 #   --force-etl                   Force ETL reprocessing even if config hasn't changed
+#   --snowflake-synth             Use Snowflake's built-in GENERATE_SYNTHETIC_DATA instead of local synthesis
 #
 ################################################################################
 
@@ -53,6 +54,7 @@ SKIP_PRIVACY=false
 SKIP_UPLOAD=false
 OUTPUT_TABLE=""
 WAREHOUSE=""
+SNOWFLAKE_SYNTH=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -99,10 +101,12 @@ Options:
     --output-table <name>         Output table name (default: <config_name>_SYNTHETIC_DATA)
     --warehouse <name>            Snowflake warehouse to use (default: connection default)
     --force-etl                   Force ETL reprocessing even if config hasn't changed
+    --snowflake-synth             Use Snowflake's built-in GENERATE_SYNTHETIC_DATA instead of local synthesis
     -h, --help                    Show this help message
 
 Example:
     $0 amc_hf_complete --work-dir /scratch/sbenson --warehouse COMPUTE_WH
+    $0 amc_hf_complete --snowflake-synth --skip-upload
 
 EOF
     exit 1
@@ -169,6 +173,10 @@ while [ $# -gt 0 ]; do
             ;;
         --force-etl)
             FORCE_ETL=true
+            shift
+            ;;
+        --snowflake-synth)
+            SNOWFLAKE_SYNTH=true
             shift
             ;;
         -h|--help)
@@ -250,6 +258,11 @@ log_info "Configuration: $CONFIG_NAME"
 log_info "Working directory: $WORK_DIR"
 log_info "Snowflake home: $SNOWFLAKE_HOME"
 log_info "Output table: $OUTPUT_TABLE"
+if [ "$SNOWFLAKE_SYNTH" = true ]; then
+    log_info "Synthesis mode: Snowflake GENERATE_SYNTHETIC_DATA"
+else
+    log_info "Synthesis mode: Local (Doppelganger)"
+fi
 if [ -n "$WAREHOUSE" ]; then
     log_info "Warehouse: $WAREHOUSE"
 else
@@ -490,18 +503,121 @@ if [ "$SKIP_SYNTHESIS" = false ]; then
     log_info "========================================="
     log_info "Step 4: Running synthetic data generation"
     log_info "========================================="
-    
-    log_info "Running synthesis with config: $GEN_CONFIG"
-    python3 "${SCRIPT_DIR}/run_synthesis_local.py" \
-        --etl-config "$ETL_CONFIG_TEMP" \
-        --gen-config "$GEN_CONFIG" \
-        --output-dir "$WORK_DIR"
-    
-    if [ $? -eq 0 ]; then
-        log_success "Synthetic data generation completed"
+
+    if [ "$SNOWFLAKE_SYNTH" = true ]; then
+        ############################################################################
+        # Snowflake built-in GENERATE_SYNTHETIC_DATA path
+        ############################################################################
+        log_info "Using Snowflake GENERATE_SYNTHETIC_DATA method"
+
+        # Resolve the fully-qualified input table name (ETL fillnan output)
+        SF_INPUT_TABLE="${PREPROCESSED_TABLE}"
+
+        # Output table for the Snowflake-generated synthetic data
+        SF_SYNTH_OUTPUT_TABLE="${OUTPUT_TABLE}"
+
+        # Build the columns spec from the synth config JSON
+        log_info "Reading columns from synth config: $GEN_CONFIG"
+        COLUMNS_SPEC=$(python3 << PYEOF
+import json, sys
+
+try:
+    with open('${GEN_CONFIG}') as f:
+        cfg = json.load(f)
+
+    cols = cfg.get('columns', [])
+    if not cols:
+        print("ERROR: No 'columns' key found in synth config", file=sys.stderr)
+        sys.exit(1)
+
+    # Build Snowflake column spec: each column gets an empty dict {}
+    parts = []
+    for col in cols:
+        parts.append(f"'{col}': {{}}")
+
+    print(', '.join(parts))
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+        )
+
+        if [ $? -ne 0 ] || [ -z "$COLUMNS_SPEC" ]; then
+            log_error "Failed to read columns from synth config"
+            exit 1
+        fi
+
+        log_info "Calling SNOWFLAKE.DATA_PRIVACY.GENERATE_SYNTHETIC_DATA..."
+        log_info "  Input table:  $SF_INPUT_TABLE"
+        log_info "  Output table: $SF_SYNTH_OUTPUT_TABLE"
+
+        snow_sql -q "
+CALL SNOWFLAKE.DATA_PRIVACY.GENERATE_SYNTHETIC_DATA({
+    'datasets': [
+        {
+            'input_table': '${SF_INPUT_TABLE}',
+            'output_table': '${SF_SYNTH_OUTPUT_TABLE}',
+            'columns': { ${COLUMNS_SPEC} }
+        }
+    ],
+    'replace_output_tables': TRUE
+});
+"
+        if [ $? -eq 0 ]; then
+            log_success "Snowflake synthetic data generation completed"
+        else
+            log_error "Snowflake synthetic data generation failed"
+            exit 1
+        fi
+
+        # Download the synthetic data from the Snowflake output table
+        log_info "Downloading Snowflake-generated synthetic data..."
+        snow_sql -q "SELECT * FROM ${SF_SYNTH_OUTPUT_TABLE}" --format csv > "${WORK_DIR}/synthetic_data.csv"
+
+        if [ $? -ne 0 ]; then
+            log_error "Failed to download synthetic data from Snowflake"
+            exit 1
+        fi
+
+        log_info "Converting synthetic data CSV to Parquet..."
+        python3 << PYEOF
+import pandas as pd
+import sys
+
+try:
+    df = pd.read_csv('${WORK_DIR}/synthetic_data.csv')
+    print(f"Loaded {len(df)} synthetic rows with {len(df.columns)} columns")
+    df.to_parquet('${WORK_DIR}/synthetic_data.parquet', index=False)
+    print("Successfully converted to Parquet format")
+except Exception as e:
+    print(f"Error: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+
+        if [ $? -eq 0 ]; then
+            log_success "Synthetic data downloaded and converted successfully"
+            rm -f "${WORK_DIR}/synthetic_data.csv"
+        else
+            log_error "Failed to convert synthetic data to Parquet"
+            exit 1
+        fi
+
     else
-        log_error "Synthetic data generation failed"
-        exit 1
+        ############################################################################
+        # Local Doppelganger synthesis path (original behaviour)
+        ############################################################################
+        log_info "Running local synthesis with config: $GEN_CONFIG"
+        python3 "${SCRIPT_DIR}/run_synthesis_local.py" \
+            --etl-config "$ETL_CONFIG_TEMP" \
+            --gen-config "$GEN_CONFIG" \
+            --output-dir "$WORK_DIR"
+        
+        if [ $? -eq 0 ]; then
+            log_success "Synthetic data generation completed"
+        else
+            log_error "Synthetic data generation failed"
+            exit 1
+        fi
     fi
 else
     log_warning "Skipping synthesis step"
@@ -558,6 +674,14 @@ fi
 ################################################################################
 # Step 7: Upload Synthetic Data to Snowflake
 ################################################################################
+if [ "$SNOWFLAKE_SYNTH" = true ] && [ "$SKIP_UPLOAD" = false ]; then
+    log_info ""
+    log_info "========================================="
+    log_info "Step 7: Upload skipped (synthetic data already in Snowflake table: ${OUTPUT_TABLE})"
+    log_info "========================================="
+    SKIP_UPLOAD=true
+fi
+
 if [ "$SKIP_UPLOAD" = false ]; then
     log_info ""
     log_info "========================================="
@@ -646,6 +770,11 @@ log_info "========================================="
 log_info "Pipeline Execution Summary"
 log_info "========================================="
 log_success "All steps completed successfully!"
+if [ "$SNOWFLAKE_SYNTH" = true ]; then
+    log_info "Synthesis method: Snowflake GENERATE_SYNTHETIC_DATA"
+else
+    log_info "Synthesis method: Local (Doppelganger)"
+fi
 log_info ""
 log_info "Output files:"
 log_info "  - Preprocessed data: ${WORK_DIR}/preprocessed_data.parquet"
@@ -659,7 +788,7 @@ fi
 log_info ""
 log_info "Snowflake tables:"
 log_info "  - Preprocessed: ${CONFIG_NAME}_preprocessed_imputed"
-if [ "$SKIP_UPLOAD" = false ]; then
+if [ "$SKIP_UPLOAD" = false ] || [ "$SNOWFLAKE_SYNTH" = true ]; then
     log_info "  - Synthetic: ${OUTPUT_TABLE}"
 fi
 log_info ""
