@@ -12,6 +12,15 @@ import logging
 import json
 import luigi
 import os
+
+# TabPFN synthesizer (optional dependency)
+try:
+    from dpplgngr.models.tabpfn_synthesizer import TabPFNSynthesizer
+    _tabpfn_available = True
+except ImportError:
+    _tabpfn_available = False
+    TabPFNSynthesizer = None
+
 # Import last ETL step for requirements
 from dpplgngr.etl.prep_dataset_tabular import ImputeScaleCategorize, TuplesProcess
 # Import missing value handler
@@ -35,7 +44,8 @@ function_dict = {
         "gradient_accumulation_steps": 4,
         "save_strategy": "no",
         "train_size": 1.0  # Use all data for training, disable validation/evaluation split
-    }] # TODO: Make the options configurable
+    }], # TODO: Make the options configurable
+    "TabPFN": TabPFNSynthesizer,  # TabPFN unsupervised generation (requires tabpfn-extensions)
 }
 
 # Synthesizers that require NaN handling
@@ -44,7 +54,7 @@ SYNTHESIZERS_REQUIRING_NAN_FILL = {
 }
 
 # Synthesizers that can handle NaNs natively
-SYNTHESIZERS_WITH_NAN_SUPPORT = ["GC", "CTGAN", "TVAE"]
+SYNTHESIZERS_WITH_NAN_SUPPORT = ["GC", "CTGAN", "TVAE", "TabPFN"]
 
 class SDVGen(luigi.Task):
     gen_config = luigi.Parameter(default="config/synth.json")
@@ -77,6 +87,7 @@ class SDVGen(luigi.Task):
         synth_type = input_json.get('synth_type', None)
         num_points = int(input_json.get('num_points', None))
         cols = input_json.get('columns', None)
+        tabpfn_params = input_json.get('tabpfn_params', {})
         synth_out = f"synth_{synth_type}.pkl"
         synth_out = os.path.join(outdir, synth_out)
         data_out = f"synthdata_{synth_type}_{num_points}.parquet"
@@ -228,10 +239,28 @@ class SDVGen(luigi.Task):
         metadata.detect_from_dataframe(df_for_training)
 
         synth_fn = function_dict.get(synth_type)
-        
+
+        if synth_fn is None:
+            raise ValueError(
+                f"Unknown synth_type '{synth_type}'. "
+                f"Available: {list(function_dict.keys())}"
+            )
+
+        if synth_type == "TabPFN" and not _tabpfn_available:
+            raise ImportError(
+                "synth_type='TabPFN' requires 'tabpfn' and 'tabpfn-extensions'. "
+                "Install with: pip install tabpfn "
+                "'tabpfn-extensions @ git+https://github.com/PriorLabs/tabpfn-extensions.git'"
+            )
+
         logger.info(f"Metadata: {metadata.to_dict()}")
 
-        if type(synth_fn)==list:
+        if synth_type == "TabPFN":
+            # TabPFN: accepts metadata= (ignored internally) plus optional tabpfn_params
+            if tabpfn_params:
+                logger.info(f"TabPFN params from config: {tabpfn_params}")
+            synthesizer = synth_fn(metadata=metadata, **tabpfn_params)
+        elif type(synth_fn) == list:
             # REaLTabFormer - disable internal evaluation to avoid mixed-type issues
             synth_params = synth_fn[1].copy()
             synth_params['epochs'] = synth_params.get('epochs', 100)
@@ -251,7 +280,10 @@ class SDVGen(luigi.Task):
 
         # Sample synthetic data
         logger.info(f"Generating {num_points} synthetic samples...")
-        if type(synth_fn)==list:
+        if synth_type == "TabPFN":
+            synthetic_data = synthesizer.sample(num_rows=num_points)
+            synthesizer.save(filepath=self.output().path)
+        elif type(synth_fn) == list:
             synthetic_data = synthesizer.sample(n_samples=num_points)
             synthesizer.save(self.output().path+"/")
         else:

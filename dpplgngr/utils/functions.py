@@ -348,6 +348,30 @@ def pattern_match(_df, **kwargs):
         print(f"Pattern match result sample:\n{_df.head()}")
         return _df
 
+def binary_threshold(_df, **kwargs):
+    """Create binary column: 1 if col <= threshold (days), else 0. NaN (survivors) → fill_na (default 0)."""
+    out_col = kwargs.get('out_col', None)
+    col = kwargs.get('col', out_col)
+    threshold = kwargs.get('threshold', None)
+    fill_na = kwargs.get('fill_na', 0)
+
+    series = _df[col]
+    # Timedelta columns (result of datetime subtraction) need .dt.days
+    if hasattr(series, 'dt') and hasattr(series.dt, 'days'):
+        numeric = series.dt.days
+    else:
+        numeric = pd.to_numeric(series, errors='coerce')
+
+    _df[out_col] = (numeric <= threshold).fillna(False).astype(int)
+    return _df
+
+
+def rename(_df, **kwargs):
+    """Rename columns. kwargs: columns dict mapping old_name → new_name."""
+    columns = kwargs.get('columns', {})
+    return _df.rename(columns=columns)
+
+
 # Create a dictionary that maps strings to functions
 function_dict = {
     "datetime_keepfirst": datetime_keepfirst,
@@ -366,6 +390,8 @@ function_dict = {
     "chain": chain,
     "classify": classify,
     "pattern_match": pattern_match,
+    "binary_threshold": binary_threshold,
+    "rename": rename,
 }
 # Functions that don't use out_col parameter - derive from function signatures
 no_output_col_funcs = []

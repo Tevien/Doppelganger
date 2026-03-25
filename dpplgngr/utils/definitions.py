@@ -114,7 +114,9 @@ antiplatelet_atc = ["B01AC13", "B01AC17", "B01AC16", "B01AC04", "B01AC22", "B01A
 
 # Statins
 
-statins_atc = ["C10AA", "C10BA", "C10BX"]
+statins_atc = [f"C10AA{n:02d}" for n in range(1, 10)]   # Plain statins (HMG CoA reductase inhibitors)
+statins_atc += [f"C10BA{n:02d}" for n in range(1, 15)]  # Statins + other lipid-lowering combinations
+statins_atc += [f"C10BX{n:02d}" for n in range(1, 20)]  # Statins + other combinations
 
 # Specific statins
 

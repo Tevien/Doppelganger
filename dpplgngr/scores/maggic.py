@@ -1,5 +1,45 @@
+import logging
 import pandas as pd
 import numpy as np
+
+from dpplgngr.scores.base import BaseScoreCalculator, ScoreRegistry
+
+logger = logging.getLogger(__name__)
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Required feature keys for the MAGGIC score
+MAGGIC_FEATURES = [
+    "sex", "smoking", "hist_diabetes", "hist_copd", "recent_hf",
+    "betablocker", "ace_arb", "lvef", "nyha", "creatinine",
+    "bmi", "sbp", "age",
+]
+
+
+@ScoreRegistry.auto
+class MAGGICScore(BaseScoreCalculator):
+    """
+    MAGGIC heart-failure mortality risk score.
+
+    Wraps :func:`calculateMAGGIC` in the ``BaseScoreCalculator`` interface
+    so it can be used by the score-analysis pipeline.
+    """
+
+    name = "maggic"
+
+    def required_features(self):
+        return list(MAGGIC_FEATURES)
+
+    def output_columns(self):
+        return [
+            "maggic",
+            "maggic (3-years risk of death)",
+            "maggic (1-year risk of death)",
+        ]
+
+    def _calculate(self, data, column_mapping):
+        return calculateMAGGIC(data, column_mapping)
+
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -51,14 +91,37 @@ def calculateMAGGIC(data:pd.DataFrame, columns:dict,
 
     # check input
 
-    assert len(columns) == 13, "`columns` should contain `13` entries."
+    if len(columns) != 13:
+        logger.warning(
+            f"MAGGIC expects 13 column entries but received {len(columns)}. "
+            "Missing features will be assigned neutral defaults."
+        )
     missing_columns = list(set(columns.values()).difference(data.columns))
-    assert len(missing_columns) == 0, "'The following columns are missing: ' "+\
-                                   ','.join(
-                                       [list(columns.keys())[
-                                           list(columns.values()).index(e)
-                                       ] for e in missing_columns]
-                                   )
+    imputed_columns = []  # track columns that were added with defaults
+    if missing_columns:
+        missing_keys = [
+            list(columns.keys())[list(columns.values()).index(e)]
+            for e in missing_columns
+        ]
+        logger.warning(
+            f"The following MAGGIC columns are missing from the data and "
+            f"will receive neutral defaults (0-point contributions): "
+            f"{dict(zip(missing_keys, missing_columns))}"
+        )
+        # Create NaN-filled columns for missing features so indexing works.
+        # NaN comparisons evaluate to False, giving 0 contribution.
+        for mc in missing_columns:
+            data = data.copy() if mc == missing_columns[0] else data
+            data[mc] = np.nan
+            imputed_columns.append(mc)
+
+    # Convert all mapped columns to float64 so pd.NA → np.nan.
+    # This avoids 'boolean value of NA is ambiguous' errors in the
+    # list-comprehension scoring logic.
+    data = data.copy()
+    for col in columns.values():
+        if col in data.columns:
+            data[col] = pd.to_numeric(data[col], errors="coerce").astype("float64")
 
     # ### initiate empty MAGGIC
     maggic = [0] * data.shape[0]
@@ -219,9 +282,18 @@ def calculateMAGGIC(data:pd.DataFrame, columns:dict,
                                 MAGGIC_RISK1:death_risk1},
                         index=data.index)
 
-    # #### add missing values
-    new_data.loc[data[list(columns.values())].isnull().any(axis=1),
-                 [MAGGIC, MAGGIC_RISK3, MAGGIC_RISK1]] = np.nan
+    # #### add missing values — only propagate NaN from columns that were
+    # originally present in the data (skip imputed placeholders).
+    present_cols = [c for c in columns.values() if c not in imputed_columns]
+    if present_cols:
+        new_data.loc[data[present_cols].isnull().any(axis=1),
+                     [MAGGIC, MAGGIC_RISK3, MAGGIC_RISK1]] = np.nan
+
+    if imputed_columns:
+        logger.info(
+            f"MAGGIC calculated with {len(imputed_columns)} imputed feature(s) "
+            f"using neutral defaults (0 points): {imputed_columns}"
+        )
 
     # ### return
     return new_data

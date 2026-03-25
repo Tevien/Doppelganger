@@ -507,14 +507,33 @@ class PreProcess(luigi.Task):
                 # First check if we have this file checkpointed
                 current_name = f.split("/")[-1].split(".")[0]
                 saved_loc = f"{input_json['preprocessing']}/{current_name}_preprocessed.parquet"
-                # If file exists then load it
-                if os.path.exists(saved_loc):
-                    logging.info(f"*** Loading {saved_loc} ***")
+                # If file exists then load it — but validate that it actually
+                # contains parquet files (a directory may exist from a failed run)
+                def _has_parquet_files(p):
+                    import glob
+                    if not os.path.exists(p):
+                        return False
+                    if os.path.isfile(p):
+                        return p.endswith(('.parquet', '.parq', '.pq'))
+                    # directory: look for part files
+                    return bool(
+                        glob.glob(os.path.join(p, '*.parquet')) or
+                        glob.glob(os.path.join(p, '*.parq')) or
+                        glob.glob(os.path.join(p, '*.pq'))
+                    )
+
+                if _has_parquet_files(saved_loc):
+                    logging.info(f"*** Loading checkpoint {saved_loc} ***")
                     df = dd.read_parquet(saved_loc, npartitions=3)
                     # Drop helper columns that may have been saved before the fix
                     df = self.drop_helper_columns(df, input_json)
                     df_pp, pa_schema = safe_merge(df, df_pp)
                     continue
+                elif os.path.exists(saved_loc):
+                    logging.warning(
+                        f"*** Checkpoint exists but contains no parquet files "
+                        f"(likely from a failed run) — reprocessing: {saved_loc} ***"
+                    )
 
                 logging.info(f"*** Processing {f} ***")
                 vals = data_configs[o.split("/")[-1]]
@@ -543,7 +562,7 @@ class PreProcess(luigi.Task):
                     """ Assume form of cols is:
                     ["col_name", {"val_name": {"type1": name1, "type2": name2}}, ["optional_extra_col"]]
                     """
-                    
+
                     col_name = cols[0]
                     val_name = list(cols[1].keys())[0]
                     col_map = cols[1][val_name]
@@ -554,19 +573,22 @@ class PreProcess(luigi.Task):
                         raise ValueError("Too many columns specified")
                     df = vals_to_cols(df, index_col=index, code_col=col_name, value_col=val_name,
                     code_map=col_map, extra_cols=extra_cols)
-                
+
+                # Normalize index name to lowercase so files with e.g. 'Pseudo_id'
+                # (capital P, as in the Echo feather) merge correctly with 'pseudo_id'.
+                if df.index.name and df.index.name != df.index.name.lower():
+                    logging.info(f"Normalizing index name '{df.index.name}' → '{df.index.name.lower()}'")
+                    df = df.rename_axis(df.index.name.lower())
+
                 df = self.apply_transformations(df, input_json, cols, transform_type="PreTransforms")
 
                 # Drop helper columns (e.g. PATIENTCONTACTID) that are not needed
                 # in the final output — keeping them causes many-to-many joins
                 df = self.drop_helper_columns(df, input_json)
 
-                # Validate index uniqueness (is_unique, not .unique which is always truthy)
-                try:
-                    assert df.index.is_unique, "Index is not unique"
-                except AssertionError:
-                    logging.warning(f"Non-unique index detected, deduplicating...")
-                    df = df[~df.index.duplicated(keep='first')]
+                # Deduplicate on index (index.is_unique / .duplicated unsupported in this Dask version)
+                idx_name = df.index.name or 'index'
+                df = df.reset_index().drop_duplicates(subset=[idx_name]).set_index(idx_name)
 
                 # Checkpoint pre-concat only if not using SNOWFLAKE
                 if input_json.get("SOURCE", "FILE") != "SNOWFLAKE":
@@ -609,6 +631,11 @@ class PreProcess(luigi.Task):
                 if df_pp.index.name in missing_cols:
                     df_pp = df_pp.reset_index()
                     logging.info(f"Reset index, new columns: {df_pp.columns.tolist()}")
+                # Add any remaining missing columns as NaN (e.g. a classification that matched no records)
+                still_missing = [col for col in input_json['final_cols'] if col not in df_pp.columns]
+                for col in still_missing:
+                    logging.warning(f"Column '{col}' not found in data — adding as NaN column")
+                    df_pp = df_pp.assign(**{col: None})
 
         # Reduce to final specified columns
         df_pp = df_pp[input_json["final_cols"]]

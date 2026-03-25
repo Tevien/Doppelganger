@@ -85,15 +85,33 @@ class PrivacyEvaluation(luigi.Task):
         original_data = original_data[cols]
         original_data = original_data.reset_index(drop=True)
         
-        # Handle timedelta columns
-        for col in original_data.columns:
-            if original_data[col].dtype.kind == 'm':
-                original_data[col] = original_data[col].dt.days
-                
+        # Handle timedelta columns — convert to integer days so both datasets share
+        # the same scale. Synthetic parquets store timedeltas as raw int64 nanoseconds,
+        # so we also rescale any int64 columns whose original counterpart was timedelta.
+        timedelta_cols = [col for col in original_data.columns
+                          if original_data[col].dtype.kind == 'm']
+        for col in timedelta_cols:
+            original_data[col] = original_data[col].dt.days
+
         # Load synthetic data
         synthetic_data_path = os.path.join(outdir, f"synthdata_{synth_type}_{num_points}.parquet")
         synthetic_data = pd.read_parquet(synthetic_data_path)
         synthetic_data = synthetic_data.reset_index(drop=True)
+
+        # Synthetic timedelta columns are stored as int64 nanoseconds by the synthesiser.
+        # Convert to days to match original_data.
+        NS_PER_DAY = 86_400 * 1_000_000_000
+        for col in timedelta_cols:
+            if col in synthetic_data.columns and synthetic_data[col].dtype.kind in ('i', 'u', 'f'):
+                synthetic_data[col] = synthetic_data[col] / NS_PER_DAY
+
+        # Apply the same BMI filter to synthetic data to remove physiologically
+        # implausible outliers that would otherwise dominate t-closeness.
+        if bmi_col is not None and bmi_col in synthetic_data.columns:
+            synthetic_data = synthetic_data[
+                pd.to_numeric(synthetic_data[bmi_col], errors='coerce') < 100
+            ]
+            synthetic_data = synthetic_data.reset_index(drop=True)
         
         # Create plots directory
         plots_dir = self.output()['privacy_plots'].path
@@ -308,14 +326,29 @@ def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missi
         
         logger.info("Calculating privacy metrics...")
         
-        # Identify quasi-identifiers (QI) and sensitive attributes
-        n_qi = min(4, len(original_data.columns) - 1)
-        quasi_identifiers = list(original_data.columns[:n_qi])
-        
+        # Identify quasi-identifiers (QI) and sensitive attributes.
+        # Only use low-cardinality (categorical / binary / integer) columns as QIs —
+        # continuous float columns like AGEATOPNAME create singleton equivalence classes
+        # which make k-anonymity trivially 1 and inflate t-closeness.
+        def _is_low_cardinality(series, max_unique=50):
+            if series.dtype.kind in ('O', 'b'):
+                return True
+            if series.dtype.kind in ('i', 'u'):
+                return series.nunique() <= max_unique
+            return False  # float columns excluded
+
+        candidate_qi = [col for col in original_data.columns if _is_low_cardinality(original_data[col])]
+        n_qi = min(4, len(candidate_qi))
+        quasi_identifiers = candidate_qi[:n_qi]
+
+        # Fall back to first columns if no low-cardinality candidates found
+        if not quasi_identifiers:
+            quasi_identifiers = list(original_data.columns[:min(4, len(original_data.columns) - 1)])
+
         sensitive_attrs = [col for col in original_data.columns if col not in quasi_identifiers]
         if not sensitive_attrs:
             sensitive_attrs = [quasi_identifiers.pop()]
-        
+
         logger.info(f"Quasi-identifiers: {quasi_identifiers}")
         logger.info(f"Sensitive attributes: {sensitive_attrs}")
         
@@ -350,29 +383,36 @@ def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missi
                     results[f'l_diversity_{label}'] = {'error': str(e)}
         
         # --- t-Closeness ---
-        # t = max Earth Mover's Distance between the sensitive attribute distribution
-        #     within any equivalence class and the overall distribution
+        # t = max normalised Earth Mover's Distance between the sensitive attribute
+        # distribution within any equivalence class and the overall distribution.
+        # Following Li et al. (2007): for numerical attributes the EMD is normalised
+        # by the range of the sensitive attribute so t is dimensionless in [0, 1].
+        # For categorical attributes the EMD is normalised by the number of distinct
+        # values (max possible EMD between two integer-coded distributions).
         def _t_closeness(df, qi_cols, sensitive_col):
             overall = df[sensitive_col]
             # For categorical data, convert to numeric codes for EMD
             if overall.dtype == 'object' or str(overall.dtype) == 'category':
                 codes_map = {v: i for i, v in enumerate(overall.unique())}
                 overall_vals = overall.map(codes_map).values.astype(float)
+                n_vals = max(len(codes_map) - 1, 1)  # normalisation denominator
                 grouped = df.groupby(qi_cols, dropna=False)
                 max_t = 0.0
                 for _, group in grouped:
                     group_vals = group[sensitive_col].map(codes_map).values.astype(float)
                     if len(group_vals) > 0:
-                        max_t = max(max_t, _emd(overall_vals, group_vals))
+                        max_t = max(max_t, _emd(overall_vals, group_vals) / n_vals)
                 return max_t
             else:
                 overall_vals = overall.dropna().values.astype(float)
+                attr_range = float(overall_vals.max() - overall_vals.min())
+                normaliser = attr_range if attr_range > 0 else 1.0
                 grouped = df.groupby(qi_cols, dropna=False)
                 max_t = 0.0
                 for _, group in grouped:
                     group_vals = group[sensitive_col].dropna().values.astype(float)
                     if len(group_vals) > 0:
-                        max_t = max(max_t, _emd(overall_vals, group_vals))
+                        max_t = max(max_t, _emd(overall_vals, group_vals) / normaliser)
                 return max_t
         
         if sensitive_attrs:
@@ -533,32 +573,46 @@ def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missi
                 # Data is already filled, no need to dropna
                 original_col = original_filled[col]
                 synthetic_col = synthetic_filled[col]
-                
+
                 if len(original_col) > 0 and len(synthetic_col) > 0:
-                    # Wasserstein distance (Earth Mover's Distance)
+                    # Wasserstein distance (Earth Mover's Distance) — raw units
                     wd = wasserstein_distance(original_col, synthetic_col)
-                    
+
+                    # Normalised Wasserstein: divide both series by the original std so
+                    # the distance is dimensionless and comparable across columns with
+                    # different scales (e.g., days vs mmHg vs mg/dL).
+                    std = float(original_col.std())
+                    if std > 0:
+                        wd_norm = wasserstein_distance(
+                            original_col / std, synthetic_col / std
+                        )
+                    else:
+                        wd_norm = 0.0
+
                     # Kolmogorov-Smirnov test
                     ks_stat, ks_pval = ks_2samp(original_col, synthetic_col)
-                    
+
                     repu_scores[col] = {
                         'wasserstein_distance': float(wd),
+                        'wasserstein_distance_normalised': float(wd_norm),
                         'ks_statistic': float(ks_stat),
                         'ks_pvalue': float(ks_pval)
                     }
-                    logger.info(f"RepU ({col}) - Wasserstein: {wd:.4f}, KS: {ks_stat:.4f}")
-            
+                    logger.info(f"RepU ({col}) - Wasserstein: {wd:.4f} (norm: {wd_norm:.4f}), KS: {ks_stat:.4f}")
+
             results['repu'] = repu_scores
-            
+
             # Calculate average RepU score
             if repu_scores:
                 avg_wd = np.mean([s['wasserstein_distance'] for s in repu_scores.values()])
+                avg_wd_norm = np.mean([s['wasserstein_distance_normalised'] for s in repu_scores.values()])
                 avg_ks = np.mean([s['ks_statistic'] for s in repu_scores.values()])
                 results['repu_summary'] = {
                     'avg_wasserstein_distance': float(avg_wd),
+                    'avg_wasserstein_distance_normalised': float(avg_wd_norm),
                     'avg_ks_statistic': float(avg_ks)
                 }
-                logger.info(f"Average RepU Wasserstein Distance: {avg_wd:.4f}")
+                logger.info(f"Average RepU Wasserstein Distance: {avg_wd:.4f} (norm: {avg_wd_norm:.4f})")
                 logger.info(f"Average RepU KS Statistic: {avg_ks:.4f}")
         else:
             logger.info("No numeric columns available for RepU calculation")
@@ -596,40 +650,58 @@ def evaluate_privacy(original_data, synthetic_data, plots_dir=None, handle_missi
             # For each synthetic record, find nearest neighbor in original data
             nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(original_scaled)
             distances, indices = nbrs.kneighbors(synthetic_scaled)
-            
+
+            # Threshold: 5th percentile of real-to-real leave-one-out NN distances.
+            # A synthetic record is a potential member only if it is closer to a real
+            # record than 95% of real records are to their own nearest neighbour.
+            # This scales automatically with dimensionality and dataset size.
+            nbrs_real = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(original_scaled)
+            real_nn_dists, _ = nbrs_real.kneighbors(original_scaled)
+            real_nn_dists = real_nn_dists[:, 1]  # skip self (distance=0)
+            threshold = float(np.percentile(real_nn_dists, 5))
+            logger.info(f"MIA threshold (5th pct real-to-real NN dist): {threshold:.4f}")
+
             # Calculate MIA metrics
             distances_flat = distances.flatten()
-            threshold = np.percentile(distances_flat, 10)  # 10th percentile as threshold
-            
             mia_positive = np.sum(distances_flat < threshold)
             mia_rate = mia_positive / len(distances_flat)
-            
+
             results['membership_inference'] = {
                 'mean_distance': float(np.mean(distances_flat)),
                 'median_distance': float(np.median(distances_flat)),
                 'min_distance': float(np.min(distances_flat)),
-                'threshold': float(threshold),
+                'threshold': threshold,
                 'potential_members': int(mia_positive),
                 'membership_rate': float(mia_rate)
             }
-            
+
             logger.info(f"MIA Mean Distance: {results['membership_inference']['mean_distance']:.4f}")
             logger.info(f"MIA Membership Rate: {mia_rate:.4f}")
             logger.info(f"Potential Members: {mia_positive}/{len(distances_flat)}")
-            
+
             # Plot MIA results
             if plots_dir:
-                plt.figure(figsize=(10, 6))
-                plt.hist(distances_flat, bins=50, alpha=0.7, color='coral', edgecolor='black')
-                plt.axvline(threshold, color='red', linestyle='--', 
-                           label=f'Threshold (10th percentile): {threshold:.4f}')
-                plt.xlabel('Distance to Nearest Original Record')
-                plt.ylabel('Frequency')
-                plt.title('Membership Inference Attack: Distance Distribution')
-                plt.legend()
-                plt.tight_layout()
-                plt.savefig(os.path.join(plots_dir, 'mia_distribution.png'), dpi=300, bbox_inches='tight')
-                plt.close()
+                fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+                axes[0].hist(distances_flat, bins=50, alpha=0.7, color='coral', edgecolor='black')
+                axes[0].axvline(threshold, color='red', linestyle='--',
+                                label=f'Threshold (5th pct real-NN): {threshold:.4f}')
+                axes[0].set_xlabel('Distance to Nearest Original Record')
+                axes[0].set_ylabel('Frequency')
+                axes[0].set_title('Synthetic → Real NN distances')
+                axes[0].legend()
+
+                axes[1].hist(real_nn_dists, bins=50, alpha=0.7, color='steelblue', edgecolor='black')
+                axes[1].axvline(threshold, color='red', linestyle='--',
+                                label=f'Threshold: {threshold:.4f}')
+                axes[1].set_xlabel('Distance to Nearest Original Record (leave-one-out)')
+                axes[1].set_ylabel('Frequency')
+                axes[1].set_title('Real → Real NN distances (baseline)')
+                axes[1].legend()
+
+                fig.tight_layout()
+                fig.savefig(os.path.join(plots_dir, 'mia_distribution.png'), dpi=300, bbox_inches='tight')
+                plt.close(fig)
         else:
             logger.info("No numeric columns available for MIA")
             results['membership_inference'] = {'error': 'No numeric columns'}

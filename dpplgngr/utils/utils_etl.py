@@ -64,7 +64,9 @@ def vals_to_cols(df, index_col='pseudo_id', code_col='BepalingCode', value_col='
 
     # Group and pivot
     grouped = df.groupby([index_col, 'target_col'])['tuple'].agg(list).reset_index()
-    grouped['target_col'] = grouped['target_col'].astype('category').cat.set_categories(code_map.values())
+    # Deduplicate values (multiple codes may map to the same column name)
+    unique_categories = list(dict.fromkeys(code_map.values()))
+    grouped['target_col'] = grouped['target_col'].astype('category').cat.set_categories(unique_categories)
 
     print(f"Grouped dataframe shape: {grouped.shape}")
     print(f"Grouped dataframe columns: {grouped.columns.tolist()}")
