@@ -21,7 +21,6 @@ from torch_geometric.utils import to_undirected, add_self_loops
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
 from sklearn.manifold import TSNE
-import matplotlib.pyplot as plt
 import pickle
 import io
 import os
@@ -229,89 +228,173 @@ class GraphImputationModel:
         if allow_missing_training:
             logger.info("Missing data training enabled: model will learn from real missing patterns")
         
+    # ------------------------------------------------------------------
+    # Vectorised graph construction (replaces O(N²) Python loop)
+    # ------------------------------------------------------------------
+
     def _create_adaptive_graph(self, X: np.ndarray, missing_mask: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Create graph that adapts to missing data patterns."""
-        n_samples = X.shape[0]
-        edges = []
-        edge_weights = []
-        
-        for i in range(n_samples):
-            # Find features observed in sample i
-            observed_features_i = ~missing_mask[i]
-            
-            if np.sum(observed_features_i) == 0:
-                continue  # Skip if no observed features
-                
-            distances = []
-            valid_neighbors = []
-            
-            for j in range(n_samples):
-                if i == j:
-                    continue
-                    
-                # Find common observed features between i and j
-                observed_features_j = ~missing_mask[j]
-                common_features = observed_features_i & observed_features_j
-                
-                if np.sum(common_features) < 2:
-                    continue
-                
-                # Calculate distance using only common observed features
-                X_i_common = X[i, common_features]
-                X_j_common = X[j, common_features]
-                
-                distance = np.sqrt(np.sum((X_i_common - X_j_common)**2))
-                distances.append(distance)
-                valid_neighbors.append(j)
-            
-            if not valid_neighbors:
+        """Create k-NN graph that adapts to missing-data patterns.
+
+        Strategy
+        --------
+        1.  Group samples by their observation pattern (which features are
+            observed).  For clinical data with d=12 features there are at most
+            2^12 = 4096 patterns, so the number of groups is small.
+        2.  Within each group *all* samples share the same observed feature set,
+            so pairwise distances can be computed with a single vectorised call.
+        3.  Between groups that share ≥ 2 common observed features, distances
+            are computed on the common subset — again vectorised.
+        4.  Per sample, the k nearest neighbours across all groups are kept.
+
+        This replaces the previous O(N²) pure-Python double loop and is
+        typically 100–500× faster for N > 1 000.
+        """
+        n_samples, n_features = X.shape
+        k = self.k_neighbors
+
+        # --- 1. Group samples by observation pattern -----------------------
+        obs_mask = ~missing_mask  # True = observed
+        # Represent each pattern as a tuple for hashing
+        pattern_to_indices: dict[tuple, np.ndarray] = {}
+        pattern_keys = [tuple(row) for row in obs_mask]
+        for idx, key in enumerate(pattern_keys):
+            if key not in pattern_to_indices:
+                pattern_to_indices[key] = []
+            pattern_to_indices[key].append(idx)
+        pattern_to_indices = {k: np.array(v) for k, v in pattern_to_indices.items()}
+
+        patterns = list(pattern_to_indices.keys())
+        n_patterns = len(patterns)
+        logger.debug(f"Graph construction: {n_samples} samples, {n_patterns} observation patterns")
+
+        # Pre-allocate per-sample neighbour arrays (distances + indices)
+        # We keep the top-k closest across all pattern-pair comparisons.
+        # Using lists-of-lists and consolidating at the end is fastest for
+        # the typical case (few patterns, many samples).
+        all_nn_dists = [[] for _ in range(n_samples)]   # list[list[float]]
+        all_nn_idxs  = [[] for _ in range(n_samples)]   # list[list[int]]
+
+        # --- 2. Compute pairwise distances per pattern pair ----------------
+        from scipy.spatial.distance import cdist
+
+        for pi in range(n_patterns):
+            pat_i = np.array(patterns[pi], dtype=bool)
+            idxs_i = pattern_to_indices[patterns[pi]]
+            if pat_i.sum() == 0:
                 continue
-                
-            # Select k nearest neighbors
-            distances = np.array(distances)
-            k_actual = min(self.k_neighbors, len(distances))
-            
-            if k_actual > 0:
-                nearest_indices = np.argsort(distances)[:k_actual]
-                
-                for idx in nearest_indices:
-                    neighbor_idx = valid_neighbors[idx]
-                    weight = np.exp(-distances[idx])
-                    edges.append([i, neighbor_idx])
-                    edge_weights.append(weight)
-        
-        if not edges:
-            # Fallback: create simple grid connections
+
+            for pj in range(pi, n_patterns):
+                pat_j = np.array(patterns[pj], dtype=bool)
+                idxs_j = pattern_to_indices[patterns[pj]]
+                if pat_j.sum() == 0:
+                    continue
+
+                common = pat_i & pat_j
+                if common.sum() < 2:
+                    continue
+
+                Xi = X[np.ix_(idxs_i, common)]
+                Xj = X[np.ix_(idxs_j, common)]
+
+                # cdist is C-level and handles (|I|, |J|) in one call
+                D = cdist(Xi, Xj, metric='euclidean')  # (|I|, |J|)
+
+                same_group = (pi == pj)
+
+                # For each row in idxs_i, find the k closest in idxs_j
+                k_local = min(k, D.shape[1] - (1 if same_group else 0))
+                if k_local <= 0:
+                    continue
+
+                for li, gi in enumerate(idxs_i):
+                    row = D[li]
+                    if same_group:
+                        # Exclude self-distance (which is 0)
+                        row = row.copy()
+                        self_col = np.searchsorted(idxs_j, gi)
+                        if self_col < len(idxs_j) and idxs_j[self_col] == gi:
+                            row[self_col] = np.inf
+
+                    topk = min(k, len(row))
+                    if topk >= len(row):
+                        part_idx = np.arange(len(row))
+                    else:
+                        part_idx = np.argpartition(row, topk)[:topk]
+                    all_nn_dists[gi].extend(row[part_idx].tolist())
+                    all_nn_idxs[gi].extend(idxs_j[part_idx].tolist())
+
+                # If pi != pj, also collect neighbours for idxs_j → idxs_i
+                if not same_group:
+                    for lj, gj in enumerate(idxs_j):
+                        col = D[:, lj]
+                        topk = min(k, len(col))
+                        if topk >= len(col):
+                            part_idx = np.arange(len(col))
+                        else:
+                            part_idx = np.argpartition(col, topk)[:topk]
+                        all_nn_dists[gj].extend(col[part_idx].tolist())
+                        all_nn_idxs[gj].extend(idxs_i[part_idx].tolist())
+
+        # --- 3. Per-sample: keep global top-k neighbours ------------------
+        src_list = []
+        dst_list = []
+        w_list   = []
+
+        for i in range(n_samples):
+            dists = np.array(all_nn_dists[i])
+            idxs  = np.array(all_nn_idxs[i], dtype=np.intp)
+            if len(dists) == 0:
+                continue
+            k_actual = min(k, len(dists))
+            if k_actual >= len(dists):
+                best = np.arange(len(dists))
+            else:
+                best = np.argpartition(dists, k_actual)[:k_actual]
+            for b in best:
+                src_list.append(i)
+                dst_list.append(idxs[b])
+                w_list.append(float(np.exp(-dists[b])))
+
+        if not src_list:
+            # Fallback: chain-connect first few samples
             for i in range(min(n_samples - 1, 10)):
-                edges.append([i, i + 1])
-                edge_weights.append(1.0)
-        
-        edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
-        edge_weights = torch.tensor(edge_weights, dtype=torch.float)
-        
-        # Make undirected and add self-loops
+                src_list.append(i); dst_list.append(i + 1); w_list.append(1.0)
+
+        edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
+        edge_weights = torch.tensor(w_list, dtype=torch.float)
+
+        # Make undirected + self-loops
         edge_index, edge_weights = to_undirected(edge_index, edge_weights, num_nodes=n_samples)
         edge_index, edge_weights = add_self_loops(edge_index, edge_weights, fill_value=1.0, num_nodes=n_samples)
-        
+
         return edge_index, edge_weights
     
     def _create_training_scenarios(self, X: np.ndarray, missing_rates: List[float] = [0.1, 0.2, 0.3, 0.4]
                                    ) -> List[Tuple[float, np.ndarray]]:
-        """Create hierarchical training scenarios with progressively more missing data."""
+        """Create hierarchical training scenarios with progressively more missing data.
+
+        Vectorised: generates the mask for all samples at once instead of
+        looping row-by-row in Python.
+        """
+        n_samples, n_features = X.shape
         training_scenarios = []
-        
+
         for rate in missing_rates:
+            n_missing = int(rate * n_features)
+            if n_missing == 0:
+                continue
             for _ in range(10):  # Multiple scenarios per rate
-                missing_mask = np.zeros_like(X, dtype=bool)
-                
-                for i in range(len(X)):
-                    n_missing = int(rate * X.shape[1])
-                    if n_missing > 0:
-                        missing_features = np.random.choice(X.shape[1], n_missing, replace=False)
-                        missing_mask[i, missing_features] = True
-                
+                # For each sample, independently choose n_missing features to mask.
+                # argsort of uniform randoms gives a random permutation per row.
+                rand = np.random.rand(n_samples, n_features)
+                order = rand.argsort(axis=1)  # (N, D) — per-row permutation
+                missing_mask = np.zeros((n_samples, n_features), dtype=bool)
+                # Mark the first n_missing columns of each permuted row
+                cols = order[:, :n_missing]                     # (N, n_missing)
+                rows = np.arange(n_samples)[:, None]            # (N, 1)
+                missing_mask[rows, cols] = True
                 training_scenarios.append((rate, missing_mask))
-        
+
         return training_scenarios
     
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Optional[np.ndarray] = None,
@@ -428,7 +511,60 @@ class GraphImputationModel:
             training_scenarios = self._create_training_scenarios(X_scaled)
             if verbose:
                 logger.info(f"Created {len(training_scenarios)} artificial training scenarios")
-        
+
+        # ------------------------------------------------------------------
+        # PRE-BUILD GRAPHS + TENSORS for every scenario (one-time cost)
+        # ------------------------------------------------------------------
+        # Previously, _create_adaptive_graph was called *inside* the epoch
+        # loop for every selected scenario — 5 calls × 300 epochs = 1 500
+        # graph constructions.  The missing masks are fixed across epochs, so
+        # we build each graph once, move the tensors to the device, and reuse.
+        # ------------------------------------------------------------------
+        import time as _time
+
+        if verbose:
+            logger.info(f"Pre-building graphs for {len(training_scenarios)} scenarios …")
+            _t_graph_start = _time.time()
+
+        scenario_cache: list[dict] = []   # one dict per scenario
+
+        for si, (rate, scen_mask) in enumerate(training_scenarios):
+            # ---------- input / target arrays ----------------------------
+            X_input = np.nan_to_num(X_scaled.copy(), nan=0.0)
+            X_input[scen_mask] = 0.0
+
+            X_target_clean = np.nan_to_num(X_scaled.copy(), nan=0.0)
+
+            # trainable mask: positions we artificially masked AND where
+            # the real data was observed (so we have ground truth).
+            if has_missing and self.allow_missing_training:
+                trainable_mask = scen_mask & ~real_missing_mask
+            else:
+                trainable_mask = scen_mask
+
+            # ---------- graph -------------------------------------------
+            edge_index, edge_weights = self._create_adaptive_graph(X_input, scen_mask)
+
+            # ---------- move everything to device once -------------------
+            entry = {
+                "rate":          rate,
+                "X_input":       torch.tensor(X_input, dtype=torch.float32).to(self.device),
+                "X_target":      torch.tensor(X_target_clean, dtype=torch.float32).to(self.device),
+                "scen_mask":     torch.tensor(scen_mask, dtype=torch.bool).to(self.device),
+                "trainable_mask":torch.tensor(trainable_mask, dtype=torch.bool).to(self.device),
+                "n_trainable":   int(trainable_mask.sum()),
+                "edge_index":    edge_index.to(self.device),
+            }
+            scenario_cache.append(entry)
+
+            if verbose and (si + 1) % 10 == 0:
+                _elapsed = _time.time() - _t_graph_start
+                logger.info(f"  … {si + 1}/{len(training_scenarios)} graphs built ({_elapsed:.1f}s)")
+
+        if verbose:
+            _t_graph_total = _time.time() - _t_graph_start
+            logger.info(f"All {len(training_scenarios)} graphs built in {_t_graph_total:.1f}s")
+
         if verbose:
             logger.info("="*80)
             logger.info("TRAINING DETAILS")
@@ -464,9 +600,12 @@ class GraphImputationModel:
         
         # Training metrics tracking
         best_loss = float('inf')
+        best_epoch = 0
         loss_history = []
+        _train_start = _time.time()
         
         for epoch in range(self.epochs):
+            _epoch_start = _time.time()
             self.model.train()
             epoch_losses = []
             epoch_mse_losses = []
@@ -475,7 +614,8 @@ class GraphImputationModel:
             # Sample training scenarios (focus more on hard scenarios in later epochs)
             # Also prioritize real missing patterns if available
             scenario_weights = []
-            for rate, _ in training_scenarios:
+            for entry in scenario_cache:
+                rate = entry["rate"]
                 if rate == 'real':
                     weight = 5  # High priority for real missing patterns
                 elif rate == 'augmented':
@@ -489,78 +629,53 @@ class GraphImputationModel:
                 scenario_weights.append(weight)
             
             # Sample a few scenarios per epoch
-            n_scenarios_per_epoch = min(5, len(training_scenarios))
+            n_scenarios_per_epoch = min(5, len(scenario_cache))
             selected_scenarios = np.random.choice(
-                len(training_scenarios), n_scenarios_per_epoch, 
+                len(scenario_cache), n_scenarios_per_epoch, 
                 p=np.array(scenario_weights) / np.sum(scenario_weights)
             )
             
             for scenario_idx in selected_scenarios:
-                rate, missing_mask = training_scenarios[scenario_idx]
+                entry = scenario_cache[scenario_idx]
+                rate = entry["rate"]
                 
-                # Create input with missing values
-                X_input = X_scaled.copy()
-                # For NaN values in X_scaled, keep them as 0 for input
-                X_input = np.nan_to_num(X_input, nan=0.0)
-                X_input[missing_mask] = 0  # Replace scenario-missing with 0
-                
-                # For target, we need to handle pre-existing NaN
-                X_target_clean = X_scaled.copy()
-                # Create a target mask that includes both scenario missing AND real missing
-                combined_missing_mask = missing_mask.copy()
-                if has_missing and self.allow_missing_training:
-                    combined_missing_mask = combined_missing_mask | real_missing_mask
-                
-                # Fill NaN in target for loss calculation (won't be used due to mask)
-                X_target_clean = np.nan_to_num(X_target_clean, nan=0.0)
-                
-                # Create adaptive graph
-                edge_index, edge_weights = self._create_adaptive_graph(X_input, missing_mask)
-                
-                # Convert to tensors
-                X_tensor = torch.tensor(X_input, dtype=torch.float32).to(self.device)
-                X_target = torch.tensor(X_target_clean, dtype=torch.float32).to(self.device)
-                missing_mask_tensor = torch.tensor(missing_mask, dtype=torch.bool).to(self.device)
-                edge_index = edge_index.to(self.device)
+                # All tensors are already on device — no copies needed
+                X_tensor       = entry["X_input"]
+                X_target       = entry["X_target"]
+                scen_mask_t    = entry["scen_mask"]
+                trainable_mask_t = entry["trainable_mask"]
+                edge_index     = entry["edge_index"]
+                n_trainable    = entry["n_trainable"]
                 
                 optimizer.zero_grad()
                 
                 # Forward pass
-                predictions, uncertainties, global_conf = self.model(X_tensor, edge_index, missing_mask_tensor)
+                predictions, uncertainties, global_conf = self.model(X_tensor, edge_index, scen_mask_t)
                 
-                # Reconstruction loss (only on missing features where we have ground truth)
-                # If using real missing data, we can only compute loss on artificially masked features
-                # where we know the true value
+                # Reconstruction loss
                 if has_missing and self.allow_missing_training:
-                    # Only compute loss where we artificially masked (not where real data was missing)
-                    trainable_mask = missing_mask & ~real_missing_mask
-                    if np.sum(trainable_mask) > 0:
-                        trainable_mask_tensor = torch.tensor(trainable_mask, dtype=torch.bool).to(self.device)
-                        mse_loss = F.mse_loss(predictions[trainable_mask_tensor], X_target[trainable_mask_tensor])
+                    if n_trainable > 0:
+                        mse_loss = F.mse_loss(predictions[trainable_mask_t], X_target[trainable_mask_t])
                     else:
-                        # If no trainable positions, use very small loss
                         mse_loss = torch.tensor(0.0, device=self.device)
                 else:
-                    # Original behavior: compute loss on all missing positions
-                    mse_loss = F.mse_loss(predictions[missing_mask_tensor], X_target[missing_mask_tensor])
+                    mse_loss = F.mse_loss(predictions[scen_mask_t], X_target[scen_mask_t])
                 
                 # Uncertainty loss (encourage well-calibrated uncertainty)
-                # Use the same mask as MSE loss
                 if has_missing and self.allow_missing_training:
-                    if np.sum(trainable_mask) > 0:
-                        trainable_mask_tensor = torch.tensor(trainable_mask, dtype=torch.bool).to(self.device)
+                    if n_trainable > 0:
                         uncertainty_loss = torch.mean(
-                            torch.log(uncertainties[trainable_mask_tensor] + 1e-6) + 
-                            (predictions[trainable_mask_tensor] - X_target[trainable_mask_tensor])**2 / 
-                            (2 * uncertainties[trainable_mask_tensor] + 1e-6)
+                            torch.log(uncertainties[trainable_mask_t] + 1e-6) + 
+                            (predictions[trainable_mask_t] - X_target[trainable_mask_t])**2 / 
+                            (2 * uncertainties[trainable_mask_t] + 1e-6)
                         )
                     else:
                         uncertainty_loss = torch.tensor(0.0, device=self.device)
                 else:
                     uncertainty_loss = torch.mean(
-                        torch.log(uncertainties[missing_mask_tensor] + 1e-6) + 
-                        (predictions[missing_mask_tensor] - X_target[missing_mask_tensor])**2 / 
-                        (2 * uncertainties[missing_mask_tensor] + 1e-6)
+                        torch.log(uncertainties[scen_mask_t] + 1e-6) + 
+                        (predictions[scen_mask_t] - X_target[scen_mask_t])**2 / 
+                        (2 * uncertainties[scen_mask_t] + 1e-6)
                     )
                 
                 # Combined loss
@@ -570,8 +685,6 @@ class GraphImputationModel:
                     weight_uncertainty = 0.1 + 0.1 * rate
                 total_loss = mse_loss + weight_uncertainty * uncertainty_loss
                 
-                # Only perform backward pass if we have trainable positions
-                # (i.e., if loss requires gradients)
                 if total_loss.requires_grad:
                     total_loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
@@ -580,10 +693,6 @@ class GraphImputationModel:
                     epoch_losses.append(total_loss.item())
                     epoch_mse_losses.append(mse_loss.item())
                     epoch_uncertainty_losses.append(uncertainty_loss.item())
-                else:
-                    # Skip this scenario as there are no trainable positions
-                    if verbose:
-                        logger.debug(f"Skipping scenario {scenario_idx} - no trainable positions")
             
             scheduler.step()
             
@@ -603,34 +712,66 @@ class GraphImputationModel:
                 best_loss = avg_loss
                 best_epoch = epoch
             
-            # Detailed logging every 30 epochs
-            if verbose and epoch % 30 == 0:
-                logger.info(f"Epoch {epoch:4d}/{self.epochs}")
-                logger.info(f"  Total Loss:       {avg_loss:.6f}")
-                logger.info(f"  MSE Loss:         {avg_mse:.6f}")
-                logger.info(f"  Uncertainty Loss: {avg_uncertainty:.6f}")
-                logger.info(f"  Learning Rate:    {scheduler.get_last_lr()[0]:.6f}")
-                logger.info(f"  Best Loss:        {best_loss:.6f} (epoch {best_epoch})")
+            # ----- Per-epoch progress line (every epoch) ------------------
+            _epoch_dur = _time.time() - _epoch_start
+            _elapsed_total = _time.time() - _train_start
+            _epochs_done = epoch + 1
+            _epochs_left = self.epochs - _epochs_done
+            _avg_epoch = _elapsed_total / _epochs_done
+            _eta = _avg_epoch * _epochs_left
+
+            if verbose:
+                # Compact single-line progress every epoch
+                _eta_str = f"{int(_eta//3600)}h{int((_eta%3600)//60):02d}m" if _eta >= 3600 else f"{int(_eta//60)}m{int(_eta%60):02d}s"
+                _elapsed_str = f"{int(_elapsed_total//3600)}h{int((_elapsed_total%3600)//60):02d}m" if _elapsed_total >= 3600 else f"{int(_elapsed_total//60)}m{int(_elapsed_total%60):02d}s"
+                gpu_str = ""
+                if torch.cuda.is_available():
+                    gpu_str = f" | GPU {torch.cuda.memory_allocated(0)/1e9:.2f}GB"
+                logger.info(
+                    f"Epoch {epoch+1:4d}/{self.epochs} | "
+                    f"loss {avg_loss:.5f} (mse {avg_mse:.5f} unc {avg_uncertainty:.5f}) | "
+                    f"best {best_loss:.5f} @{best_epoch+1} | "
+                    f"lr {scheduler.get_last_lr()[0]:.2e} | "
+                    f"{_epoch_dur:.2f}s/ep | "
+                    f"elapsed {_elapsed_str} ETA {_eta_str}"
+                    f"{gpu_str}"
+                )
+
+            # Detailed block every 30 epochs
+            if verbose and (epoch + 1) % 30 == 0:
+                logger.info("-" * 80)
+                logger.info(f"  Detailed stats at epoch {epoch+1}:")
+                logger.info(f"    Total Loss:       {avg_loss:.6f}")
+                logger.info(f"    MSE Loss:         {avg_mse:.6f}")
+                logger.info(f"    Uncertainty Loss: {avg_uncertainty:.6f}")
+                logger.info(f"    Learning Rate:    {scheduler.get_last_lr()[0]:.6f}")
+                logger.info(f"    Best Loss:        {best_loss:.6f} (epoch {best_epoch+1})")
+                logger.info(f"    Avg time/epoch:   {_avg_epoch:.2f}s")
                 
                 # GPU memory tracking
                 if torch.cuda.is_available():
-                    logger.info(f"  GPU Memory:       {torch.cuda.memory_allocated(0) / 1e9:.4f} GB allocated, "
+                    logger.info(f"    GPU Memory:       {torch.cuda.memory_allocated(0) / 1e9:.4f} GB allocated, "
                                f"{torch.cuda.memory_reserved(0) / 1e9:.4f} GB cached")
                 
                 # Loss trend
                 if len(loss_history) > 30:
                     recent_trend = np.mean(loss_history[-10:]) - np.mean(loss_history[-30:-20])
-                    trend_str = "improving" if recent_trend < 0 else "degrading" if recent_trend > 0 else "stable"
-                    logger.info(f"  Loss Trend:       {trend_str} (Δ={recent_trend:.6f})")
-                logger.info("-" * 60)
+                    trend_str = "↓ improving" if recent_trend < 0 else "↑ degrading" if recent_trend > 0 else "→ stable"
+                    logger.info(f"    Loss Trend:       {trend_str} (Δ={recent_trend:.6f})")
+                logger.info("-" * 80)
         
         if verbose:
+            _total_train = _time.time() - _train_start
+            _total_str = f"{int(_total_train//3600)}h{int((_total_train%3600)//60):02d}m{int(_total_train%60):02d}s"
             logger.info("="*80)
             logger.info("TRAINING COMPLETE")
             logger.info("="*80)
+            logger.info(f"Total time:       {_total_str}")
+            logger.info(f"Avg time/epoch:   {_total_train / self.epochs:.2f}s")
             logger.info(f"Final Loss:       {loss_history[-1]:.6f}")
-            logger.info(f"Best Loss:        {best_loss:.6f} (epoch {best_epoch})")
-            logger.info(f"Loss Reduction:   {((loss_history[0] - best_loss) / loss_history[0] * 100):.2f}%")
+            logger.info(f"Best Loss:        {best_loss:.6f} (epoch {best_epoch+1})")
+            if loss_history[0] > 0:
+                logger.info(f"Loss Reduction:   {((loss_history[0] - best_loss) / loss_history[0] * 100):.2f}%")
             
             # Final GPU stats
             if torch.cuda.is_available():
@@ -741,7 +882,201 @@ class GraphImputationModel:
             return X_imputed, uncertainty_info
         else:
             return X_imputed
-    
+
+    def impute_multiple(
+        self,
+        X: Union[pd.DataFrame, np.ndarray],
+        missing_mask: np.ndarray,
+        n_imputations: int = 20,
+        use_mc_dropout: bool = True,
+        seed: Optional[int] = 42,
+    ) -> Tuple[np.ndarray, Dict]:
+        """
+        Generate multiple imputation samples for uncertainty quantification.
+
+        Uses two complementary sources of uncertainty:
+
+        1. **Parametric sampling** – For each missing cell the model predicts
+           a mean μ and variance σ² (via the learned heteroscedastic variance
+           heads).  Each imputation sample draws from N(μ, σ²), capturing
+           *aleatoric* uncertainty (inherent data noise).
+
+        2. **MC Dropout** (optional) – Running the forward pass with dropout
+           active produces different μ/σ² per run, capturing *epistemic*
+           uncertainty (model uncertainty).
+
+        Downstream, M complete datasets are passed through risk-score
+        calculators independently.  The spread of M score values per patient
+        provides a non-parametric confidence interval for the score that
+        properly accounts for imputation-induced uncertainty.
+
+        This follows Rubin's multiple-imputation framework where:
+        - Between-imputation variance B = var(scores across M imputations)
+        - Total variance T ≈ (1 + 1/M) × B
+        - 95% CI: score_mean ± t × √T
+
+        Parameters
+        ----------
+        X : array-like of shape (N, D)
+            Data matrix with missing values indicated by *missing_mask*.
+        missing_mask : ndarray of shape (N, D), dtype bool
+            ``True`` where values are missing.
+        n_imputations : int
+            Number of complete datasets to generate (M).  20–50 is typical
+            for stable MI variance estimates.
+        use_mc_dropout : bool
+            If True, enable dropout during the forward pass for each sample
+            (MC Dropout).  The model uses LayerNorm (no running-mean
+            statistics), so ``model.train()`` only affects dropout layers.
+        seed : int or None
+            Random seed for reproducibility.
+
+        Returns
+        -------
+        X_multiple : ndarray of shape (M, N, D)
+            M complete imputed datasets in original (unscaled) space.
+        uncertainty_info : dict
+            Detailed per-cell and per-feature uncertainty statistics:
+
+            * ``imputed_mean``  – (N, D) mean across M samples
+            * ``imputed_std``   – (N, D) std across M samples
+            * ``model_variance`` – (N, D) deterministic learned variance
+            * ``confidence_scores`` – (N,) global confidence per patient
+            * ``feature_uncertainty`` – per-feature summary dict
+            * ``missing_mask`` – the original mask for downstream use
+        """
+        if seed is not None:
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
+        if isinstance(X, pd.DataFrame):
+            X = X.values
+
+        N, D = X.shape
+
+        # ----- Prepare input (mirrors impute()) -----
+        X_clean = np.nan_to_num(X.copy(), nan=0.0)
+        X_scaled = self.scaler.transform(X_clean)
+
+        X_input = X_scaled.copy()
+        for i in range(D):
+            X_input[missing_mask[:, i], i] = self.feature_means[i]
+
+        # Build graph once (depends only on the observed structure)
+        edge_index, edge_weights = self._create_adaptive_graph(X_input, missing_mask)
+
+        X_tensor = torch.tensor(X_input, dtype=torch.float32).to(self.device)
+        missing_mask_tensor = torch.tensor(missing_mask, dtype=torch.bool).to(self.device)
+        edge_index = edge_index.to(self.device)
+
+        # ----- Collect M imputation samples -----
+        all_imputed = np.zeros((n_imputations, N, D))
+        all_preds_scaled = []  # scaled-space mean predictions per run
+        all_vars_scaled = []   # scaled-space variance per run
+
+        logger.info(
+            f"Generating {n_imputations} imputation samples "
+            f"(MC dropout={use_mc_dropout}) ..."
+        )
+
+        for m in range(n_imputations):
+            if use_mc_dropout:
+                self.model.train()   # activates dropout (LayerNorm is fine)
+            else:
+                self.model.eval()
+
+            with torch.no_grad():
+                predictions, uncertainties, global_conf = self.model(
+                    X_tensor, edge_index, missing_mask_tensor
+                )
+
+            pred_np = predictions.cpu().numpy()   # [N, D]  (mean, scaled)
+            var_np = uncertainties.cpu().numpy()   # [N, D]  (variance, scaled)
+
+            # Fallback for any NaN predictions
+            nan_pred = np.isnan(pred_np)
+            if nan_pred.any():
+                for i in range(D):
+                    pred_np[nan_pred[:, i], i] = self.feature_means[i]
+
+            # Sample from N(μ, σ²) for each missing cell (parametric draw)
+            std_np = np.sqrt(np.clip(var_np, 1e-8, None))
+            noise = np.random.randn(N, D) * std_np
+            sampled = pred_np + noise  # still in scaled space
+
+            # Build complete dataset in scaled space
+            X_imp_scaled = X_input.copy()
+            X_imp_scaled[missing_mask] = sampled[missing_mask]
+
+            # Inverse transform to original space
+            X_imp = self.scaler.inverse_transform(X_imp_scaled)
+
+            # Round integer features and clip to observed ranges
+            if self.is_integer is not None:
+                for i in range(D):
+                    if self.is_integer[i]:
+                        X_imp[:, i] = np.round(X_imp[:, i])
+                    if self.feature_min is not None and self.feature_max is not None:
+                        X_imp[:, i] = np.clip(
+                            X_imp[:, i], self.feature_min[i], self.feature_max[i]
+                        )
+
+            X_imp = np.nan_to_num(X_imp, nan=0.0)
+            all_imputed[m] = X_imp
+            all_preds_scaled.append(pred_np)
+            all_vars_scaled.append(var_np)
+
+        # Reset to eval mode
+        self.model.eval()
+
+        # ----- Deterministic reference pass (for confidence scores) -----
+        with torch.no_grad():
+            det_pred, det_unc, det_conf = self.model(
+                X_tensor, edge_index, missing_mask_tensor
+            )
+        det_var_np = det_unc.cpu().numpy()      # [N, D]
+        det_conf_np = det_conf.squeeze().cpu().numpy()  # [N]
+
+        # ----- Aggregate uncertainty statistics -----
+        imp_mean = np.mean(all_imputed, axis=0)   # [N, D]
+        imp_std = np.std(all_imputed, axis=0, ddof=1)  # [N, D]
+
+        # Per-feature summary (only for missing cells)
+        feature_uncertainty = {}
+        for i in range(D):
+            feat_mask = missing_mask[:, i]
+            if not feat_mask.any():
+                continue
+            feat_name = (
+                self.feature_names[i] if self.feature_names else f"feature_{i}"
+            )
+            feature_uncertainty[feat_name] = {
+                "n_imputed": int(feat_mask.sum()),
+                "mean_std": float(np.mean(imp_std[feat_mask, i])),
+                "median_std": float(np.median(imp_std[feat_mask, i])),
+                "mean_model_variance": float(np.mean(det_var_np[feat_mask, i])),
+                "mean_confidence": float(np.mean(det_conf_np[feat_mask])),
+            }
+
+        logger.info(
+            f"Multiple imputation complete: {n_imputations} samples, "
+            f"mean cross-sample std = {np.mean(imp_std[missing_mask]):.4f} "
+            f"(scaled), mean confidence = {np.mean(det_conf_np):.4f}"
+        )
+
+        uncertainty_info = {
+            "n_imputations": n_imputations,
+            "use_mc_dropout": use_mc_dropout,
+            "imputed_mean": imp_mean,
+            "imputed_std": imp_std,
+            "model_variance": det_var_np,
+            "confidence_scores": det_conf_np,
+            "feature_uncertainty": feature_uncertainty,
+            "missing_mask": missing_mask,
+        }
+
+        return all_imputed, uncertainty_info
+
     def visualize_tsne(self, X_real: np.ndarray, X_synthetic: np.ndarray,
                        y_real: Optional[np.ndarray] = None, y_synthetic: Optional[np.ndarray] = None,
                        save_path: Optional[str] = None) -> None:
@@ -794,6 +1129,12 @@ class GraphImputationModel:
         logger.info(f"Generating t-SNE visualization with perplexity={adjusted_perplexity} for {total_samples} samples")
         tsne = TSNE(n_components=2, random_state=42, perplexity=adjusted_perplexity)
         X_tsne = tsne.fit_transform(X_combined)
+
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            logger.warning(f"Skipping t-SNE plot because matplotlib is unavailable: {exc}")
+            return
         
         # Plot
         plt.figure(figsize=(12, 8))

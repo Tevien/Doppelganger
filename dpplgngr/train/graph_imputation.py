@@ -231,6 +231,12 @@ class TrainGraphImputer(luigi.Task):
             
             # Create artificial missing data
             X_test_values = X_test.values
+            if X_test_values.dtype.kind not in ('f', 'c'):
+                X_test_values = X_test_values.astype(np.float64)
+
+            # Track which values were *already* missing in the real data
+            real_missing = np.isnan(X_test_values)
+
             missing_mask = np.zeros_like(X_test_values, dtype=bool)
             
             for i in range(len(X_test_values)):
@@ -240,42 +246,51 @@ class TrainGraphImputer(luigi.Task):
                         X_test_values.shape[1], n_missing, replace=False
                     )
                     missing_mask[i, missing_features] = True
+
+            # Evaluable mask: positions we artificially masked AND where
+            # the ground truth is actually observed (not NaN).
+            eval_mask = missing_mask & ~real_missing
+            # The full mask for imputation includes both real + artificial
+            combined_mask = missing_mask | real_missing
             
             logger.info(f"Test Configuration:")
             logger.info(f"  Test samples:         {len(X_test)}")
             logger.info(f"  Features:             {X_test_values.shape[1]}")
             logger.info(f"  Missing rate:         {test_missing_rate:.1%}")
-            logger.info(f"  Total missing values: {np.sum(missing_mask)}")
+            logger.info(f"  Artificially masked:  {np.sum(missing_mask)}")
+            logger.info(f"  Already missing:      {np.sum(real_missing)}")
+            logger.info(f"  Evaluable positions:  {np.sum(eval_mask)}")
             logger.info("")
             
-            # Apply missing mask
+            # Apply combined mask
             X_test_missing = X_test_values.copy()
-            X_test_missing[missing_mask] = np.nan
+            X_test_missing[combined_mask] = np.nan
             
             # Impute
             logger.info("Running imputation on test set...")
             import time
             start_time = time.time()
-            X_imputed, uncertainty_info = model.impute(X_test_missing, missing_mask, return_uncertainty=True)
+            X_imputed, uncertainty_info = model.impute(X_test_missing, combined_mask, return_uncertainty=True)
             impute_time = time.time() - start_time
             
             logger.info(f"Imputation completed in {impute_time:.2f} seconds")
             logger.info(f"Average time per sample: {impute_time / len(X_test) * 1000:.2f} ms")
             logger.info("")
             
-            # Calculate imputation metrics
+            # Calculate imputation metrics — only on evaluable positions
+            # (artificially masked AND ground truth was observed)
             from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
             
-            true_missing = X_test_values[missing_mask]
-            imputed_missing = X_imputed[missing_mask]
+            true_eval = X_test_values[eval_mask]
+            imputed_eval = X_imputed[eval_mask]
             
             # Calculate per-feature metrics
             feature_metrics = []
             for feat_idx in range(X_test_values.shape[1]):
-                feat_mask = missing_mask[:, feat_idx]
-                if np.sum(feat_mask) > 0:
-                    feat_true = X_test_values[feat_mask, feat_idx]
-                    feat_imputed = X_imputed[feat_mask, feat_idx]
+                feat_eval = eval_mask[:, feat_idx]
+                if np.sum(feat_eval) > 0:
+                    feat_true = X_test_values[feat_eval, feat_idx]
+                    feat_imputed = X_imputed[feat_eval, feat_idx]
                     feat_rmse = np.sqrt(mean_squared_error(feat_true, feat_imputed))
                     feat_mae = mean_absolute_error(feat_true, feat_imputed)
                     try:
@@ -288,16 +303,17 @@ class TrainGraphImputer(luigi.Task):
                         'rmse': float(feat_rmse),
                         'mae': float(feat_mae),
                         'r2': float(feat_r2),
-                        'n_missing': int(np.sum(feat_mask))
+                        'n_evaluated': int(np.sum(feat_eval)),
+                        'n_real_missing': int(np.sum(real_missing[:, feat_idx])),
                     })
             
             # Overall metrics
-            rmse = np.sqrt(mean_squared_error(true_missing, imputed_missing))
-            mae = mean_absolute_error(true_missing, imputed_missing)
-            r2 = r2_score(true_missing, imputed_missing)
+            rmse = np.sqrt(mean_squared_error(true_eval, imputed_eval))
+            mae = mean_absolute_error(true_eval, imputed_eval)
+            r2 = r2_score(true_eval, imputed_eval)
             
             # Relative error
-            mape = np.mean(np.abs((true_missing - imputed_missing) / (np.abs(true_missing) + 1e-8))) * 100
+            mape = np.mean(np.abs((true_eval - imputed_eval) / (np.abs(true_eval) + 1e-8))) * 100
             
             logger.info("="*80)
             logger.info("IMPUTATION PERFORMANCE METRICS")
@@ -314,12 +330,12 @@ class TrainGraphImputer(luigi.Task):
             feature_metrics_sorted = sorted(feature_metrics, key=lambda x: x['rmse'])
             logger.info("Top 5 Best Imputed Features (lowest RMSE):")
             for i, fm in enumerate(feature_metrics_sorted[:5], 1):
-                logger.info(f"  {i}. {fm['feature_name'][:40]:40s} RMSE={fm['rmse']:.6f}, R²={fm['r2']:.4f}, n={fm['n_missing']}")
+                logger.info(f"  {i}. {fm['feature_name'][:40]:40s} RMSE={fm['rmse']:.6f}, R²={fm['r2']:.4f}, n={fm['n_evaluated']}")
             logger.info("")
             
             logger.info("Top 5 Worst Imputed Features (highest RMSE):")
             for i, fm in enumerate(feature_metrics_sorted[-5:][::-1], 1):
-                logger.info(f"  {i}. {fm['feature_name'][:40]:40s} RMSE={fm['rmse']:.6f}, R²={fm['r2']:.4f}, n={fm['n_missing']}")
+                logger.info(f"  {i}. {fm['feature_name'][:40]:40s} RMSE={fm['rmse']:.6f}, R²={fm['r2']:.4f}, n={fm['n_evaluated']}")
             logger.info("="*80)
             
             # Save test metrics
@@ -347,9 +363,25 @@ class TrainGraphImputer(luigi.Task):
                 tsne_path = os.path.join(working_dir, 'tsne_imputation_test.png')
                 
                 try:
+                    # t-SNE cannot handle NaN — use only rows without real
+                    # missing values, or fall back to the imputed version
+                    no_real_nan_rows = ~real_missing.any(axis=1)
+                    if no_real_nan_rows.sum() >= 200:
+                        X_real_for_tsne = X_test_values[no_real_nan_rows]
+                        X_synth_for_tsne = X_imputed[no_real_nan_rows]
+                    else:
+                        # Not enough complete rows — fill NaN with column
+                        # medians so t-SNE can run
+                        X_real_for_tsne = X_test_values.copy()
+                        for ci in range(X_real_for_tsne.shape[1]):
+                            col_vals = X_real_for_tsne[:, ci]
+                            nan_idx = np.isnan(col_vals)
+                            if nan_idx.any():
+                                col_vals[nan_idx] = np.nanmedian(col_vals)
+                        X_synth_for_tsne = X_imputed
                     model.visualize_tsne(
-                        X_real=X_test_values,
-                        X_synthetic=X_imputed,
+                        X_real=X_real_for_tsne,
+                        X_synthetic=X_synth_for_tsne,
                         save_path=tsne_path
                     )
                     logger.info(f"t-SNE plot saved to {tsne_path}")
