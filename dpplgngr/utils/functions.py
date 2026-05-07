@@ -1,5 +1,6 @@
 import dask.dataframe as dd
 import pandas as pd
+import numpy as np
 import logging
 from dpplgngr.utils.definitions import ace_atc, beta_atc, make_classification_map
 import inspect
@@ -215,7 +216,19 @@ def diff(_df, **kwargs):
             series_start = series_start.apply(lambda x: x.year)
         if series_end.dtype == 'datetime64[ns]':
             series_end = series_end.apply(lambda x: x.year)
-    _df[out_col] = series_end - series_start
+        _df[out_col] = series_end - series_start
+        return _df
+
+    diff_series = series_end - series_start
+
+    if level in ("day", "days"):
+        if hasattr(diff_series, 'dt') and hasattr(diff_series.dt, 'days'):
+            _df[out_col] = diff_series.dt.days
+        else:
+            _df[out_col] = pd.to_numeric(diff_series, errors='coerce')
+        return _df
+
+    _df[out_col] = diff_series
 
     return _df
 
@@ -223,6 +236,75 @@ def dg_map(_df, **kwargs):
     out_col = kwargs.get('out_col', None)
     map_dict = kwargs.get('map', None)
     _df[out_col] = _df[out_col].map(map_dict)
+    return _df
+
+def split_map(_df, **kwargs):
+    """
+    Split a single status column into multiple binary output columns.
+
+    Example config::
+
+        "SmokingSplit": {
+            "func": "split_map",
+            "kwargs": {
+                "input_col": "smoking_status",
+                "mapping": {
+                    "IsHuidigeRoker": 2,
+                    "IsVoormaligRoker": 1
+                },
+                "unknown_values": [-3],
+                "unknown_output": null
+            }
+        }
+
+    Parameters
+    ----------
+    input_col : str
+        Source column containing integer or categorical status values.
+    mapping : dict
+        Mapping of output column name -> matching value(s). Each value can be a
+        scalar or an iterable of values that should map to 1 for that output.
+    unknown_values : list, optional
+        Source values that should be treated as unknown/missing.
+    unknown_output : scalar, optional
+        Output value to use when the source is missing or in unknown_values.
+        Defaults to np.nan.
+    default_value : scalar, optional
+        Output value for non-matching, known source values. Defaults to 0.
+    """
+    input_col = kwargs.get('input_col', None)
+    mapping = kwargs.get('mapping', None)
+    unknown_values = kwargs.get('unknown_values', [])
+    unknown_output = kwargs.get('unknown_output', np.nan)
+    default_value = kwargs.get('default_value', 0)
+
+    if input_col is None:
+        raise ValueError("input_col must be provided")
+    if mapping is None:
+        raise ValueError("mapping must be provided")
+    if input_col not in _df.columns:
+        raise KeyError(f"Column '{input_col}' not found in dataframe")
+
+    source = _df[input_col]
+    unknown_mask = source.isna()
+    if unknown_values:
+        unknown_mask = unknown_mask | source.isin(list(unknown_values))
+
+    for out_col, positive_values in mapping.items():
+        if isinstance(positive_values, (list, tuple, set)):
+            positive_set = set(positive_values)
+        else:
+            positive_set = {positive_values}
+
+        _df[out_col] = source.apply(
+            lambda x, pos=positive_set, default=default_value, missing=unknown_output:
+                missing if pd.isna(x) else (1.0 if x in pos else float(default)),
+            meta=(out_col, 'float64')
+        )
+
+        if unknown_values:
+            _df[out_col] = _df[out_col].mask(unknown_mask, unknown_output)
+
     return _df
 
 def bool_to_int(_df, **kwargs):
@@ -383,6 +465,7 @@ function_dict = {
     "beta": beta,
     "diff": diff,
     "map": dg_map,
+    "split_map": split_map,
     "bool_to_int": bool_to_int,
     "to_numeric": to_numeric,
     "fillna": fillna,

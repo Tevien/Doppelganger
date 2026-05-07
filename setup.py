@@ -4,7 +4,9 @@ from setuptools import setup, find_packages
 setup(
     name='dpplgngr',
     packages=find_packages(),
-    version='0.5.0',
+    package_data={'dpplgngr.scores': ['prevent_coefficients.json']},
+    include_package_data=True,
+    version='0.6.0',
     description='Deep-learning automated twinning',
     author='Sean Benson',
     license='MIT',

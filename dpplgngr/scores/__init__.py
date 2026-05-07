@@ -23,6 +23,9 @@ Available Scores
 - **maggic**    – MAGGIC heart-failure mortality risk
 - **marker_hf** – MARKER-HF BDT risk score
 - **cox_ph**    – Cox proportional hazards (user-supplied coefficients)
+- **score2**    – SCORE2 / SCORE2-OP cardiovascular risk
+- **prevent**   – PREVENT 10-year and 30-year cardiovascular event risk
+- **qrisk3**    – QRISK3 10-year cardiovascular disease risk
 
 Quick Start
 -----------
@@ -101,6 +104,9 @@ from dpplgngr.scores.pipeline import (
 from dpplgngr.scores.maggic import calculateMAGGIC, MAGGICScore
 from dpplgngr.scores.marker_hf import MARKERHFScore
 from dpplgngr.scores.cox_predict import CoxPHPredictorWithUncertainty, CoxPHScore
+from dpplgngr.scores.score2 import SCORE2Score
+from dpplgngr.scores.prevent import PREVENTScore
+from dpplgngr.scores.qrisk3 import QRISK3Score
 
 # ---- Legacy Luigi tasks (backward-compatible) ----
 from dpplgngr.scores.calculate_scores import (
@@ -138,6 +144,9 @@ __all__ = [
     "MARKERHFScore",
     "CoxPHPredictorWithUncertainty",
     "CoxPHScore",
+    "SCORE2Score",
+    "PREVENTScore",
+    "QRISK3Score",
     # Legacy Luigi tasks
     "CalculateScores",
     "EvaluateScorePerformance",

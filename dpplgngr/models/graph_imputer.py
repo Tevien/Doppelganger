@@ -189,7 +189,11 @@ class GraphImputationModel:
     def __init__(self, hidden_dim: int = 128, num_layers: int = 4, num_heads: int = 8,
                  k_neighbors: int = 20, learning_rate: float = 0.001, epochs: int = 300,
                  feature_types: Optional[List[str]] = None, device: Optional[str] = None,
-                 allow_missing_training: bool = False):
+                 allow_missing_training: bool = False,
+                 real_scenarios: int = 1,
+                 augmented_scenarios: int = 20,
+                 artificial_scenarios_per_rate: int = 10,
+                 artificial_missing_rates: Optional[List[float]] = None):
         """
         Initialize the Graph Imputation Model.
         
@@ -227,6 +231,10 @@ class GraphImputationModel:
         logger.info(f"Initialized GraphImputationModel on device: {self.device}")
         if allow_missing_training:
             logger.info("Missing data training enabled: model will learn from real missing patterns")
+        self.real_scenarios = real_scenarios
+        self.augmented_scenarios = augmented_scenarios
+        self.artificial_scenarios_per_rate = artificial_scenarios_per_rate
+        self.artificial_missing_rates = artificial_missing_rates or [0.1, 0.2, 0.3, 0.4]
         
     # ------------------------------------------------------------------
     # Vectorised graph construction (replaces O(N²) Python loop)
@@ -396,6 +404,123 @@ class GraphImputationModel:
                 training_scenarios.append((rate, missing_mask))
 
         return training_scenarios
+
+    def _estimate_scenario_cache_bytes(self, n_samples: int, n_features: int, n_scenarios: int) -> int:
+        """Estimate memory required to cache all scenario tensors and graphs."""
+        float_bytes = n_samples * n_features * 4
+        mask_bytes = n_samples * n_features
+        edge_count = n_samples * (2 * self.k_neighbors + 1)
+        edge_index_bytes = edge_count * 2 * 8
+        per_scenario_bytes = (2 * float_bytes) + (2 * mask_bytes) + edge_index_bytes
+        return n_scenarios * per_scenario_bytes
+
+    def _build_training_scenario_specs(
+        self,
+        X: np.ndarray,
+        has_missing: bool,
+        real_missing_mask: np.ndarray,
+    ) -> List[Dict[str, Union[str, float, int]]]:
+        """Create lightweight scenario specifications instead of full cached masks."""
+        n_features = X.shape[1]
+        specs: List[Dict[str, Union[str, float, int]]] = []
+
+        if has_missing and self.allow_missing_training:
+            for _ in range(self.real_scenarios):
+                specs.append({"kind": "real", "rate": "real"})
+
+            for _ in range(self.augmented_scenarios):
+                specs.append({
+                    "kind": "augmented",
+                    "rate": "augmented",
+                    "seed": int(np.random.randint(0, 2**31 - 1)),
+                })
+
+            for rate in self.artificial_missing_rates:
+                n_missing = int(rate * n_features)
+                if n_missing == 0:
+                    continue
+                for _ in range(self.artificial_scenarios_per_rate):
+                    specs.append({
+                        "kind": "artificial",
+                        "rate": rate,
+                        "seed": int(np.random.randint(0, 2**31 - 1)),
+                    })
+        else:
+            for rate in self.artificial_missing_rates:
+                n_missing = int(rate * n_features)
+                if n_missing == 0:
+                    continue
+                for _ in range(self.artificial_scenarios_per_rate):
+                    specs.append({
+                        "kind": "artificial",
+                        "rate": rate,
+                        "seed": int(np.random.randint(0, 2**31 - 1)),
+                    })
+
+        return specs
+
+    def _materialize_scenario_mask(
+        self,
+        scenario_spec: Dict[str, Union[str, float, int]],
+        shape: Tuple[int, int],
+        real_missing_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Materialize a scenario mask from a lightweight scenario spec."""
+        kind = scenario_spec["kind"]
+
+        if kind == "real":
+            return real_missing_mask.copy()
+
+        rng = np.random.RandomState(int(scenario_spec["seed"]))
+
+        if kind == "augmented":
+            augmented_mask = real_missing_mask.copy()
+            flip_mask = rng.rand(*shape) < 0.1
+            return augmented_mask ^ flip_mask
+
+        rate = float(scenario_spec["rate"])
+        n_samples, n_features = shape
+        n_missing = int(rate * n_features)
+        if n_missing <= 0:
+            return np.zeros(shape, dtype=bool)
+
+        rand = rng.rand(n_samples, n_features)
+        order = rand.argsort(axis=1)
+        missing_mask = np.zeros((n_samples, n_features), dtype=bool)
+        cols = order[:, :n_missing]
+        rows = np.arange(n_samples)[:, None]
+        missing_mask[rows, cols] = True
+        return missing_mask
+
+    def _materialize_scenario_entry(
+        self,
+        scenario_spec: Dict[str, Union[str, float, int]],
+        base_input: np.ndarray,
+        target_clean: np.ndarray,
+        real_missing_mask: np.ndarray,
+        has_missing: bool,
+    ) -> Dict[str, Union[str, float, int, torch.Tensor]]:
+        """Build tensors and graph for one scenario on demand."""
+        scen_mask = self._materialize_scenario_mask(scenario_spec, target_clean.shape, real_missing_mask)
+        X_input = base_input.copy()
+        X_input[scen_mask] = 0.0
+
+        if has_missing and self.allow_missing_training:
+            trainable_mask = scen_mask & ~real_missing_mask
+        else:
+            trainable_mask = scen_mask
+
+        edge_index, _edge_weights = self._create_adaptive_graph(X_input, scen_mask)
+
+        return {
+            "rate": scenario_spec["rate"],
+            "X_input": torch.from_numpy(X_input).to(self.device),
+            "X_target": torch.from_numpy(target_clean).to(self.device),
+            "scen_mask": torch.from_numpy(scen_mask).to(self.device),
+            "trainable_mask": torch.from_numpy(trainable_mask).to(self.device),
+            "n_trainable": int(trainable_mask.sum()),
+            "edge_index": edge_index.to(self.device),
+        }
     
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Optional[np.ndarray] = None,
             feature_names: Optional[List[str]] = None, verbose: bool = True) -> 'GraphImputationModel':
@@ -481,89 +606,58 @@ class GraphImputationModel:
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs, eta_min=1e-6)
         
-        # Create training scenarios
-        # If data has real missing values and allow_missing_training=True, use them
+        scenario_specs = self._build_training_scenario_specs(X_scaled, has_missing, real_missing_mask)
         if has_missing and self.allow_missing_training:
-            # Use real missing patterns + augment with artificial scenarios
-            training_scenarios = []
-            
-            # Add real missing pattern
-            training_scenarios.append(('real', real_missing_mask.copy()))
-            
-            # Add augmented scenarios based on real missing patterns
-            for _ in range(20):  # Create variations
-                augmented_mask = real_missing_mask.copy()
-                # Randomly flip some missing/observed status to create variations
-                flip_rate = 0.1
-                flip_mask = np.random.rand(*augmented_mask.shape) < flip_rate
-                augmented_mask = augmented_mask ^ flip_mask  # XOR to flip
-                training_scenarios.append(('augmented', augmented_mask))
-            
-            # Also add some artificially created scenarios for robustness
-            artificial_scenarios = self._create_training_scenarios(X_scaled, missing_rates=[0.1, 0.2, 0.3])
-            training_scenarios.extend(artificial_scenarios)
-            
             if verbose:
                 logger.info(f"Using real missing patterns: {n_missing_total} missing values")
-                logger.info(f"Created {len(training_scenarios)} training scenarios (including real + augmented)")
+                logger.info(f"Created {len(scenario_specs)} training scenarios (including real + augmented)")
         else:
-            # Original behavior: create artificial missing scenarios
-            training_scenarios = self._create_training_scenarios(X_scaled)
             if verbose:
-                logger.info(f"Created {len(training_scenarios)} artificial training scenarios")
+                logger.info(f"Created {len(scenario_specs)} artificial training scenarios")
 
-        # ------------------------------------------------------------------
-        # PRE-BUILD GRAPHS + TENSORS for every scenario (one-time cost)
-        # ------------------------------------------------------------------
-        # Previously, _create_adaptive_graph was called *inside* the epoch
-        # loop for every selected scenario — 5 calls × 300 epochs = 1 500
-        # graph constructions.  The missing masks are fixed across epochs, so
-        # we build each graph once, move the tensors to the device, and reuse.
-        # ------------------------------------------------------------------
         import time as _time
 
-        if verbose:
-            logger.info(f"Pre-building graphs for {len(training_scenarios)} scenarios …")
-            _t_graph_start = _time.time()
-
-        scenario_cache: list[dict] = []   # one dict per scenario
-
-        for si, (rate, scen_mask) in enumerate(training_scenarios):
-            # ---------- input / target arrays ----------------------------
-            X_input = np.nan_to_num(X_scaled.copy(), nan=0.0)
-            X_input[scen_mask] = 0.0
-
-            X_target_clean = np.nan_to_num(X_scaled.copy(), nan=0.0)
-
-            # trainable mask: positions we artificially masked AND where
-            # the real data was observed (so we have ground truth).
-            if has_missing and self.allow_missing_training:
-                trainable_mask = scen_mask & ~real_missing_mask
-            else:
-                trainable_mask = scen_mask
-
-            # ---------- graph -------------------------------------------
-            edge_index, edge_weights = self._create_adaptive_graph(X_input, scen_mask)
-
-            # ---------- move everything to device once -------------------
-            entry = {
-                "rate":          rate,
-                "X_input":       torch.tensor(X_input, dtype=torch.float32).to(self.device),
-                "X_target":      torch.tensor(X_target_clean, dtype=torch.float32).to(self.device),
-                "scen_mask":     torch.tensor(scen_mask, dtype=torch.bool).to(self.device),
-                "trainable_mask":torch.tensor(trainable_mask, dtype=torch.bool).to(self.device),
-                "n_trainable":   int(trainable_mask.sum()),
-                "edge_index":    edge_index.to(self.device),
-            }
-            scenario_cache.append(entry)
-
-            if verbose and (si + 1) % 10 == 0:
-                _elapsed = _time.time() - _t_graph_start
-                logger.info(f"  … {si + 1}/{len(training_scenarios)} graphs built ({_elapsed:.1f}s)")
+        base_target_clean = np.nan_to_num(X_scaled.copy(), nan=0.0).astype(np.float32, copy=False)
+        base_input = base_target_clean.copy()
+        estimated_cache_bytes = self._estimate_scenario_cache_bytes(
+            n_samples=X_scaled.shape[0],
+            n_features=X_scaled.shape[1],
+            n_scenarios=len(scenario_specs),
+        )
+        use_lazy_scenarios = estimated_cache_bytes > (2 * 1024**3) or X_scaled.shape[0] >= 50000
 
         if verbose:
-            _t_graph_total = _time.time() - _t_graph_start
-            logger.info(f"All {len(training_scenarios)} graphs built in {_t_graph_total:.1f}s")
+            logger.info(
+                f"Estimated scenario cache size: {estimated_cache_bytes / 1e9:.2f} GB"
+            )
+            logger.info(
+                f"Scenario materialization mode: {'lazy' if use_lazy_scenarios else 'prebuilt'}"
+            )
+
+        scenario_cache: List[Optional[dict]] = [None] * len(scenario_specs)
+        if not use_lazy_scenarios:
+            if verbose:
+                logger.info(f"Pre-building graphs for {len(scenario_specs)} scenarios …")
+                _t_graph_start = _time.time()
+
+            for si, scenario_spec in enumerate(scenario_specs):
+                scenario_cache[si] = self._materialize_scenario_entry(
+                    scenario_spec,
+                    base_input,
+                    base_target_clean,
+                    real_missing_mask,
+                    has_missing,
+                )
+
+                if verbose and (si + 1) % 10 == 0:
+                    _elapsed = _time.time() - _t_graph_start
+                    logger.info(f"  … {si + 1}/{len(scenario_specs)} graphs built ({_elapsed:.1f}s)")
+
+            if verbose:
+                _t_graph_total = _time.time() - _t_graph_start
+                logger.info(f"All {len(scenario_specs)} graphs built in {_t_graph_total:.1f}s")
+        elif verbose:
+            logger.info(f"Using lazy scenario materialization for {len(scenario_specs)} scenarios")
 
         if verbose:
             logger.info("="*80)
@@ -591,7 +685,7 @@ class GraphImputationModel:
             logger.info(f"Trainable parameters: {trainable_params:,}")
             logger.info(f"Model memory size: {total_params * 4 / 1e6:.2f} MB (float32)")
             
-            logger.info(f"Training scenarios: {len(training_scenarios)}")
+            logger.info(f"Training scenarios: {len(scenario_specs)}")
             logger.info(f"Learning rate: {self.learning_rate}")
             logger.info(f"K-neighbors: {self.k_neighbors}")
             logger.info("="*80)
@@ -614,8 +708,8 @@ class GraphImputationModel:
             # Sample training scenarios (focus more on hard scenarios in later epochs)
             # Also prioritize real missing patterns if available
             scenario_weights = []
-            for entry in scenario_cache:
-                rate = entry["rate"]
+            for scenario_spec in scenario_specs:
+                rate = scenario_spec["rate"]
                 if rate == 'real':
                     weight = 5  # High priority for real missing patterns
                 elif rate == 'augmented':
@@ -629,14 +723,23 @@ class GraphImputationModel:
                 scenario_weights.append(weight)
             
             # Sample a few scenarios per epoch
-            n_scenarios_per_epoch = min(5, len(scenario_cache))
+            n_scenarios_per_epoch = min(5, len(scenario_specs))
             selected_scenarios = np.random.choice(
-                len(scenario_cache), n_scenarios_per_epoch, 
+                len(scenario_specs), n_scenarios_per_epoch, 
                 p=np.array(scenario_weights) / np.sum(scenario_weights)
             )
             
             for scenario_idx in selected_scenarios:
-                entry = scenario_cache[scenario_idx]
+                if use_lazy_scenarios:
+                    entry = self._materialize_scenario_entry(
+                        scenario_specs[scenario_idx],
+                        base_input,
+                        base_target_clean,
+                        real_missing_mask,
+                        has_missing,
+                    )
+                else:
+                    entry = scenario_cache[scenario_idx]
                 rate = entry["rate"]
                 
                 # All tensors are already on device — no copies needed
@@ -693,6 +796,11 @@ class GraphImputationModel:
                     epoch_losses.append(total_loss.item())
                     epoch_mse_losses.append(mse_loss.item())
                     epoch_uncertainty_losses.append(uncertainty_loss.item())
+
+                if use_lazy_scenarios:
+                    del entry, X_tensor, X_target, scen_mask_t, trainable_mask_t, edge_index, predictions, uncertainties, global_conf
+                    if self.device.type == 'cuda':
+                        torch.cuda.empty_cache()
             
             scheduler.step()
             

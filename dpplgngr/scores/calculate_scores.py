@@ -54,6 +54,9 @@ from dpplgngr.scores.base import ScoreRegistry  # noqa: E402
 import dpplgngr.scores.maggic      # noqa: F401, E402
 import dpplgngr.scores.marker_hf   # noqa: F401, E402
 import dpplgngr.scores.cox_predict  # noqa: F401, E402
+import dpplgngr.scores.score2  # noqa: F401, E402
+import dpplgngr.scores.prevent  # noqa: F401, E402
+import dpplgngr.scores.qrisk3  # noqa: F401, E402
 
 # Legacy lookup table (kept for backward compatibility)
 AVAILABLE_SCORES = {
@@ -61,6 +64,9 @@ AVAILABLE_SCORES = {
     'audit': 'dpplgngr.scores.audit.calculateAUDIT',
     'marker_hf': 'dpplgngr.scores.marker_hf.MARKERHFScore',
     'cox_ph': 'dpplgngr.scores.cox_predict.CoxPHScore',
+    'score2': 'dpplgngr.scores.score2.SCORE2Score',
+    'prevent': 'dpplgngr.scores.prevent.PREVENTScore',
+    'qrisk3': 'dpplgngr.scores.qrisk3.QRISK3Score',
 }
 
 

@@ -488,8 +488,12 @@ class PreProcess(luigi.Task):
             filenames = list(data_configs.keys())
             # Keep only names with normal extensions
             filenames = [f for f in filenames if any([f.endswith(ext) for ext in ['.csv', '.csv.gz', '.parquet', '.feather']])]
+            single_file_mode = len(filenames) == 1
             path = input_json['absolute_path']
             filenames = [os.path.join(path, f) for f in filenames]
+
+            if single_file_mode:
+                logging.info("*** Single-file ETL detected: skipping intermediate checkpoint merge path ***")
             
             # Load converted json if available
             converted_json = {}
@@ -527,7 +531,10 @@ class PreProcess(luigi.Task):
                     df = dd.read_parquet(saved_loc, npartitions=3)
                     # Drop helper columns that may have been saved before the fix
                     df = self.drop_helper_columns(df, input_json)
-                    df_pp, pa_schema = safe_merge(df, df_pp)
+                    if single_file_mode:
+                        df_pp = df
+                    else:
+                        df_pp, pa_schema = safe_merge(df, df_pp)
                     continue
                 elif os.path.exists(saved_loc):
                     logging.warning(
@@ -591,9 +598,13 @@ class PreProcess(luigi.Task):
                 df = df.reset_index().drop_duplicates(subset=[idx_name]).set_index(idx_name)
 
                 # Checkpoint pre-concat only if not using SNOWFLAKE
-                if input_json.get("SOURCE", "FILE") != "SNOWFLAKE":
-                    df.to_parquet(saved_loc)
-                df_pp, pa_schema = safe_merge(df, df_pp)
+                if single_file_mode:
+                    logging.info("*** Single-file ETL: bypassing intermediate checkpoint write and safe_merge ***")
+                    df_pp = df
+                else:
+                    if input_json.get("SOURCE", "FILE") != "SNOWFLAKE":
+                        df.to_parquet(saved_loc)
+                    df_pp, pa_schema = safe_merge(df, df_pp)
 
                 if len(df_pp) == 0:
                     raise ValueError("Merging files resulted in empty dataframe - likely index mismatch")

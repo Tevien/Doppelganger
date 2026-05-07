@@ -209,14 +209,27 @@ class BaseScoreCalculator(ABC):
             )
 
         # Check that mapped columns exist in the data
+        required_mapped_columns = [mapping[key] for key in self.required_features()]
         missing_cols = [
-            col for col in mapping.values() if col not in data.columns
+            col for col in required_mapped_columns if col not in data.columns
         ]
+
         if missing_cols:
             logger.warning(
-                f"[{self.name}] Dataset is missing columns: {missing_cols}. "
+                f"[{self.name}] Dataset is missing required columns: "
+                f"{missing_cols}. "
                 "Rows with missing values will yield NaN scores."
             )
+
+        # Add absent *required* columns as NaN on a copy so _calculate
+        # never hits a KeyError (same behaviour as FeatureDropper).
+        # Non-required mapping values (e.g. literal config strings like
+        # "High" for risk_region) are intentionally left alone — the
+        # individual calculator's _resolve helpers handle those.
+        if missing_cols:
+            data = data.copy()
+            for col in missing_cols:
+                data[col] = np.nan
 
         logger.info(f"Calculating score: {self.name}  (n={len(data)})")
         result = self._calculate(data, mapping)

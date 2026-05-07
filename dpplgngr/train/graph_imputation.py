@@ -184,6 +184,10 @@ class TrainGraphImputer(luigi.Task):
         logger.info(f"  K-neighbors:          {model_params.get('k_neighbors', 20)}")
         logger.info(f"  Learning rate:        {model_params.get('learning_rate', 0.001)}")
         logger.info(f"  Training epochs:      {model_params.get('epochs', 300)}")
+        logger.info(f"  Real scenarios:       {model_params.get('real_scenarios', 1)}")
+        logger.info(f"  Augmented scenarios:  {model_params.get('augmented_scenarios', 20)}")
+        logger.info(f"  Artificial/rate:      {model_params.get('artificial_scenarios_per_rate', 10)}")
+        logger.info(f"  Artificial rates:     {model_params.get('artificial_missing_rates', [0.1, 0.2, 0.3, 0.4])}")
         logger.info(f"  Allow missing train:  {allow_missing_training}")
         
         # Check CUDA availability
@@ -209,7 +213,11 @@ class TrainGraphImputer(luigi.Task):
             learning_rate=model_params.get('learning_rate', 0.001),
             epochs=model_params.get('epochs', 300),
             feature_types=feature_types,
-            allow_missing_training=allow_missing_training
+            allow_missing_training=allow_missing_training,
+            real_scenarios=model_params.get('real_scenarios', 1),
+            augmented_scenarios=model_params.get('augmented_scenarios', 20),
+            artificial_scenarios_per_rate=model_params.get('artificial_scenarios_per_rate', 10),
+            artificial_missing_rates=model_params.get('artificial_missing_rates', [0.1, 0.2, 0.3, 0.4])
         )
         
         # Train the model
